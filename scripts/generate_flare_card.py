@@ -1,20 +1,27 @@
 import os
 import glob
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import requests
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 
 FLARE_URL = "https://services.swpc.noaa.gov/json/goes/primary/xray-flares-7-day.json"
+XRAY_URL = "https://services.swpc.noaa.gov/json/goes/primary/xrays-6-hour.json"
+
 TEMPLATE_PATH = "template.png"
 CARDS_DIR = "cards"
+CHARTS_DIR = "charts"
 DATA_DIR = "data"
 STATE_FILE = os.path.join(DATA_DIR, "last_flare_id.txt")
 
 
 def ensure_dirs():
     os.makedirs(CARDS_DIR, exist_ok=True)
+    os.makedirs(CHARTS_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
 
 
@@ -43,15 +50,49 @@ def fetch_latest_flare() -> dict:
     response.raise_for_status()
     data = response.json()
 
-    if not isinstance(data, list) or not data:
-        raise RuntimeError("No flare data returned from NOAA.")
-
     valid = [f for f in data if f.get("max_time") and f.get("max_class")]
     if not valid:
         raise RuntimeError("No valid flare events found.")
 
     valid.sort(key=lambda f: f["max_time"])
     return valid[-1]
+
+
+def fetch_xray_series():
+    response = requests.get(XRAY_URL, timeout=20, headers={"User-Agent": "substorm-flare-bot"})
+    response.raise_for_status()
+    data = response.json()
+
+    times = []
+    fluxes = []
+
+    for row in data:
+        energy = str(row.get("energy", "")).strip()
+        flux = row.get("flux")
+        time_tag = row.get("time_tag")
+
+        # keep the GOES long channel only
+        if energy != "0.1-0.8nm":
+            continue
+        if flux is None or time_tag is None:
+            continue
+
+        try:
+            t = parse_time(time_tag)
+            f = float(flux)
+        except Exception:
+            continue
+
+        if f <= 0:
+            continue
+
+        times.append(t)
+        fluxes.append(f)
+
+    if not times:
+        raise RuntimeError("No valid X-ray time series data found.")
+
+    return times, fluxes
 
 
 def read_last_flare_id() -> str:
@@ -69,11 +110,11 @@ def write_last_flare_id(value: str):
 def class_color(flare_class: str):
     letter = (flare_class or "C")[0].upper()
     if letter == "X":
-        return (255, 140, 40)
+        return (255, 130, 40)
     if letter == "M":
-        return (255, 180, 60)
+        return (255, 170, 60)
     if letter == "C":
-        return (255, 170, 70)
+        return (255, 220, 120)
     if letter == "B":
         return (180, 210, 255)
     return (230, 230, 230)
@@ -83,21 +124,87 @@ def draw_glow_text(base: Image.Image, position, text: str, font, fill_rgb):
     glow_layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
     glow_draw = ImageDraw.Draw(glow_layer)
 
-    # wide glow
     glow_draw.text(position, text, font=font, fill=fill_rgb + (120,))
     glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(24))
     base.alpha_composite(glow_layer)
 
-    # tighter glow
     glow_layer2 = Image.new("RGBA", base.size, (0, 0, 0, 0))
     glow_draw2 = ImageDraw.Draw(glow_layer2)
-    glow_draw2.text(position, text, font=font, fill=(255, 240, 180, 160))
+    glow_draw2.text(position, text, font=font, fill=(255, 240, 180, 170))
     glow_layer2 = glow_layer2.filter(ImageFilter.GaussianBlur(10))
     base.alpha_composite(glow_layer2)
 
-    # crisp text
     final_draw = ImageDraw.Draw(base)
     final_draw.text(position, text, font=font, fill=(255, 235, 170, 255))
+
+
+def build_chart(flare: dict, output_path: str):
+    times, fluxes = fetch_xray_series()
+    peak_time = parse_time(flare["max_time"])
+    flare_class = flare["max_class"]
+
+    plt.figure(figsize=(8.2, 4.4))
+    ax = plt.gca()
+    ax.set_facecolor((0.03, 0.03, 0.07))
+    plt.gcf().patch.set_facecolor((0.03, 0.03, 0.07))
+
+    # main curve
+    ax.plot(times, fluxes, linewidth=2.0, color="#fff3d1")
+
+    # log scale
+    ax.set_yscale("log")
+    ax.set_ylim(1e-8, 1e-4)
+
+    # flare class threshold lines
+    thresholds = [
+        (1e-8, "A", "#888888"),
+        (1e-7, "B", "#9cc9ff"),
+        (1e-6, "C", "#ffe57a"),
+        (1e-5, "M", "#ffb347"),
+        (1e-4, "X", "#ff7043"),
+    ]
+
+    for value, label, color in thresholds:
+        ax.axhline(value, color=color, linewidth=0.8, alpha=0.55)
+
+    ax.set_yticks([1e-8, 1e-7, 1e-6, 1e-5, 1e-4])
+    ax.set_yticklabels(["A", "B", "C", "M", "X"], color="#f5dfb0", fontsize=11)
+
+    # grid
+    ax.grid(True, which="major", linestyle="-", linewidth=0.5, alpha=0.25, color="#ffffff")
+    ax.grid(True, which="minor", linestyle="-", linewidth=0.25, alpha=0.08, color="#ffffff")
+
+    # x-axis formatting
+    ax.tick_params(axis="x", colors="#f5dfb0", labelsize=10)
+    ax.tick_params(axis="y", colors="#f5dfb0", labelsize=11)
+
+    # mark peak flare time if it falls inside current 6h data
+    if times[0] <= peak_time <= times[-1]:
+        # choose nearest point for annotation
+        nearest_idx = min(range(len(times)), key=lambda i: abs((times[i] - peak_time).total_seconds()))
+        peak_flux = fluxes[nearest_idx]
+
+        ax.axvline(peak_time, color="#ffb347", linewidth=1.0, alpha=0.7)
+        ax.scatter([peak_time], [peak_flux], s=50, color="#ffd27a", zorder=5)
+        ax.text(
+            peak_time,
+            peak_flux * 1.25,
+            flare_class,
+            color="#ffd27a",
+            fontsize=13,
+            fontweight="bold",
+            ha="left",
+            va="bottom",
+        )
+
+    # style spines
+    for spine in ax.spines.values():
+        spine.set_color("#c9b27a")
+        spine.set_alpha(0.35)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200, bbox_inches="tight", facecolor=plt.gcf().get_facecolor())
+    plt.close()
 
 
 def prune_old_cards():
@@ -134,14 +241,14 @@ def render_card(flare: dict):
 
     fill_color = class_color(flare_class)
 
-    # Flare magnitude
+    # flare magnitude
     bbox = draw.textbbox((0, 0), flare_class, font=font_class)
     text_w = bbox[2] - bbox[0]
     x_class = (template.width - text_w) // 2
     y_class = 520
     draw_glow_text(template, (x_class, y_class), flare_class, font_class, fill_color)
 
-    # Info lines
+    # info lines
     line1 = f"Start : {start_str}      Peak : {peak_str}"
     line2 = f"End : {end_str}      Duration : {duration_str}"
 
@@ -154,13 +261,32 @@ def render_card(flare: dict):
     draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
     draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
-    # Chart label placeholder for now
+    # chart title
     chart_title = f"{satellite} X-Ray Flux (Last 6 Hours)"
     bbox_chart = draw.textbbox((0, 0), chart_title, font=font_chart)
     x_chart = (template.width - (bbox_chart[2] - bbox_chart[0])) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
-    # Footer
+    # build chart image
+    chart_path = os.path.join(CHARTS_DIR, "latest_chart.png")
+    build_chart(flare, chart_path)
+
+    # paste chart into rectangle
+    chart_img = Image.open(chart_path).convert("RGBA")
+
+    # box tuned to your current template
+    target_x = 105
+    target_y = 865
+    target_w = 870
+    target_h = 395
+
+    chart_img.thumbnail((target_w, target_h))
+    paste_x = target_x + (target_w - chart_img.width) // 2
+    paste_y = target_y + (target_h - chart_img.height) // 2
+
+    template.alpha_composite(chart_img, (paste_x, paste_y))
+
+    # footer
     footer = f"Data: NOAA SWPC • Satellite: {satellite}"
     bbox_footer = draw.textbbox((0, 0), footer, font=font_footer)
     x_footer = (template.width - (bbox_footer[2] - bbox_footer[0])) // 2
