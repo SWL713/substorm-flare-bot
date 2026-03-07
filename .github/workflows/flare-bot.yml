@@ -22,8 +22,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests pillow
-
+        run: pip install requests pillow matplotlib
+        
       - name: Run flare generator
         run: python scripts/generate_flare_card.py
 
