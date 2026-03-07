@@ -1,8 +1,9 @@
 import os
 import glob
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import requests
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -71,7 +72,6 @@ def fetch_xray_series():
         flux = row.get("flux")
         time_tag = row.get("time_tag")
 
-        # keep the GOES long channel only
         if energy != "0.1-0.8nm":
             continue
         if flux is None or time_tag is None:
@@ -83,7 +83,8 @@ def fetch_xray_series():
         except Exception:
             continue
 
-        if f <= 0:
+        # Filter out bad/instrument glitch values
+        if f <= 1e-9:
             continue
 
         times.append(t)
@@ -91,6 +92,12 @@ def fetch_xray_series():
 
     if not times:
         raise RuntimeError("No valid X-ray time series data found.")
+
+    # Light smoothing
+    fluxes = np.array(fluxes)
+    window = 5
+    fluxes = np.convolve(fluxes, np.ones(window) / window, mode="same")
+    fluxes = fluxes.tolist()
 
     return times, fluxes
 
@@ -123,7 +130,6 @@ def class_color(flare_class: str):
 def draw_glow_text(base: Image.Image, position, text: str, font, fill_rgb):
     glow_layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
     glow_draw = ImageDraw.Draw(glow_layer)
-
     glow_draw.text(position, text, font=font, fill=fill_rgb + (120,))
     glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(24))
     base.alpha_composite(glow_layer)
@@ -148,14 +154,13 @@ def build_chart(flare: dict, output_path: str):
     ax.set_facecolor((0.03, 0.03, 0.07))
     plt.gcf().patch.set_facecolor((0.03, 0.03, 0.07))
 
-    # main curve
-    ax.plot(times, fluxes, linewidth=2.0, color="#fff3d1")
+    # glow line under main line
+    ax.plot(times, fluxes, linewidth=6, color="#ffe9a8", alpha=0.12)
+    ax.plot(times, fluxes, linewidth=2.5, color="#ffe9a8")
 
-    # log scale
     ax.set_yscale("log")
     ax.set_ylim(1e-8, 1e-4)
 
-    # flare class threshold lines
     thresholds = [
         (1e-8, "A", "#888888"),
         (1e-7, "B", "#9cc9ff"),
@@ -170,17 +175,13 @@ def build_chart(flare: dict, output_path: str):
     ax.set_yticks([1e-8, 1e-7, 1e-6, 1e-5, 1e-4])
     ax.set_yticklabels(["A", "B", "C", "M", "X"], color="#f5dfb0", fontsize=11)
 
-    # grid
-    ax.grid(True, which="major", linestyle="-", linewidth=0.5, alpha=0.25, color="#ffffff")
-    ax.grid(True, which="minor", linestyle="-", linewidth=0.25, alpha=0.08, color="#ffffff")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.6, alpha=0.35, color="#ffffff")
+    ax.grid(True, which="minor", linestyle="-", linewidth=0.25, alpha=0.12, color="#ffffff")
 
-    # x-axis formatting
     ax.tick_params(axis="x", colors="#f5dfb0", labelsize=10)
     ax.tick_params(axis="y", colors="#f5dfb0", labelsize=11)
 
-    # mark peak flare time if it falls inside current 6h data
     if times[0] <= peak_time <= times[-1]:
-        # choose nearest point for annotation
         nearest_idx = min(range(len(times)), key=lambda i: abs((times[i] - peak_time).total_seconds()))
         peak_flux = fluxes[nearest_idx]
 
@@ -188,7 +189,7 @@ def build_chart(flare: dict, output_path: str):
         ax.scatter([peak_time], [peak_flux], s=50, color="#ffd27a", zorder=5)
         ax.text(
             peak_time,
-            peak_flux * 1.25,
+            peak_flux * 1.5,
             flare_class,
             color="#ffd27a",
             fontsize=13,
@@ -197,7 +198,6 @@ def build_chart(flare: dict, output_path: str):
             va="bottom",
         )
 
-    # style spines
     for spine in ax.spines.values():
         spine.set_color("#c9b27a")
         spine.set_alpha(0.35)
@@ -241,14 +241,12 @@ def render_card(flare: dict):
 
     fill_color = class_color(flare_class)
 
-    # flare magnitude
     bbox = draw.textbbox((0, 0), flare_class, font=font_class)
     text_w = bbox[2] - bbox[0]
     x_class = (template.width - text_w) // 2
     y_class = 520
     draw_glow_text(template, (x_class, y_class), flare_class, font_class, fill_color)
 
-    # info lines
     line1 = f"Start : {start_str}      Peak : {peak_str}"
     line2 = f"End : {end_str}      Duration : {duration_str}"
 
@@ -261,20 +259,16 @@ def render_card(flare: dict):
     draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
     draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
-    # chart title
     chart_title = f"{satellite} X-Ray Flux (Last 6 Hours)"
     bbox_chart = draw.textbbox((0, 0), chart_title, font=font_chart)
     x_chart = (template.width - (bbox_chart[2] - bbox_chart[0])) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
-    # build chart image
     chart_path = os.path.join(CHARTS_DIR, "latest_chart.png")
     build_chart(flare, chart_path)
 
-    # paste chart into rectangle
     chart_img = Image.open(chart_path).convert("RGBA")
 
-    # box tuned to your current template
     target_x = 105
     target_y = 865
     target_w = 870
@@ -286,7 +280,6 @@ def render_card(flare: dict):
 
     template.alpha_composite(chart_img, (paste_x, paste_y))
 
-    # footer
     footer = f"Data: NOAA SWPC • Satellite: {satellite}"
     bbox_footer = draw.textbbox((0, 0), footer, font=font_footer)
     x_footer = (template.width - (bbox_footer[2] - bbox_footer[0])) // 2
