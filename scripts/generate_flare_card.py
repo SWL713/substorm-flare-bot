@@ -1,38 +1,192 @@
-import requests
-from PIL import Image, ImageDraw, ImageFont
-import json
+import os
+import glob
 from datetime import datetime
 
-# NOAA flare feed
-url = "https://services.swpc.noaa.gov/json/goes/primary/xray-flares-7-day.json"
+import requests
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-data = requests.get(url).json()
 
-flare = data[-1]
+FLARE_URL = "https://services.swpc.noaa.gov/json/goes/primary/xray-flares-7-day.json"
+TEMPLATE_PATH = "template.png"
+CARDS_DIR = "cards"
+DATA_DIR = "data"
+STATE_FILE = os.path.join(DATA_DIR, "last_flare_id.txt")
 
-flare_class = flare["max_class"]
-start = flare["begin_time"][11:16]
-peak = flare["max_time"][11:16]
-end = flare["end_time"][11:16]
 
-duration = (
-    datetime.fromisoformat(flare["end_time"].replace("Z","")) -
-    datetime.fromisoformat(flare["begin_time"].replace("Z",""))
-).seconds // 60
+def ensure_dirs():
+    os.makedirs(CARDS_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
 
-template = Image.open("template.png")
-draw = ImageDraw.Draw(template)
 
-font_big = ImageFont.truetype("Arial.ttf",120)
-font_small = ImageFont.truetype("Arial.ttf",40)
+def load_font(size: int, bold: bool = False):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size=size)
+    return ImageFont.load_default()
 
-draw.text((540,550),flare_class,anchor="mm",fill=(255,140,0),font=font_big)
 
-draw.text((350,700),f"Start : {start} UTC",fill="white",font=font_small)
-draw.text((700,700),f"Peak : {peak} UTC",fill="white",font=font_small)
-draw.text((350,760),f"End : {end} UTC",fill="white",font=font_small)
-draw.text((700,760),f"Duration : {duration} minutes",fill="white",font=font_small)
+def parse_time(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
-filename = f"cards/flare_{flare_class}_{peak}.png"
 
-template.save(filename)
+def flare_id(flare: dict) -> str:
+    return f"{flare.get('begin_time','')}_{flare.get('max_time','')}_{flare.get('max_class','')}_{flare.get('satellite','')}"
+
+
+def fetch_latest_flare() -> dict:
+    response = requests.get(FLARE_URL, timeout=20, headers={"User-Agent": "substorm-flare-bot"})
+    response.raise_for_status()
+    data = response.json()
+
+    if not isinstance(data, list) or not data:
+        raise RuntimeError("No flare data returned from NOAA.")
+
+    valid = [f for f in data if f.get("max_time") and f.get("max_class")]
+    if not valid:
+        raise RuntimeError("No valid flare events found.")
+
+    valid.sort(key=lambda f: f["max_time"])
+    return valid[-1]
+
+
+def read_last_flare_id() -> str:
+    if not os.path.exists(STATE_FILE):
+        return ""
+    with open(STATE_FILE, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def write_last_flare_id(value: str):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        f.write(value)
+
+
+def class_color(flare_class: str):
+    letter = (flare_class or "C")[0].upper()
+    if letter == "X":
+        return (255, 140, 40)
+    if letter == "M":
+        return (255, 180, 60)
+    if letter == "C":
+        return (255, 170, 70)
+    if letter == "B":
+        return (180, 210, 255)
+    return (230, 230, 230)
+
+
+def draw_glow_text(base: Image.Image, position, text: str, font, fill_rgb):
+    glow_layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow_layer)
+
+    # wide glow
+    glow_draw.text(position, text, font=font, fill=fill_rgb + (120,))
+    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(24))
+    base.alpha_composite(glow_layer)
+
+    # tighter glow
+    glow_layer2 = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    glow_draw2 = ImageDraw.Draw(glow_layer2)
+    glow_draw2.text(position, text, font=font, fill=(255, 240, 180, 160))
+    glow_layer2 = glow_layer2.filter(ImageFilter.GaussianBlur(10))
+    base.alpha_composite(glow_layer2)
+
+    # crisp text
+    final_draw = ImageDraw.Draw(base)
+    final_draw.text(position, text, font=font, fill=(255, 235, 170, 255))
+
+
+def prune_old_cards():
+    files = sorted(glob.glob(os.path.join(CARDS_DIR, "*.png")), key=os.path.getmtime, reverse=True)
+    for old_file in files[10:]:
+        os.remove(old_file)
+
+
+def render_card(flare: dict):
+    template = Image.open(TEMPLATE_PATH).convert("RGBA")
+    draw = ImageDraw.Draw(template)
+
+    flare_class = flare["max_class"]
+    start_dt = parse_time(flare["begin_time"])
+    peak_dt = parse_time(flare["max_time"])
+    end_dt = parse_time(flare["end_time"]) if flare.get("end_time") else None
+
+    start_str = start_dt.strftime("%H:%M UTC")
+    peak_str = peak_dt.strftime("%H:%M UTC")
+    end_str = end_dt.strftime("%H:%M UTC") if end_dt else "ONGOING"
+
+    if end_dt:
+        duration_minutes = int((end_dt - start_dt).total_seconds() // 60)
+        duration_str = f"{duration_minutes} Minutes"
+    else:
+        duration_str = "ONGOING"
+
+    satellite = f"GOES-{flare.get('satellite', '??')}"
+
+    font_class = load_font(120, bold=True)
+    font_info = load_font(28, bold=False)
+    font_chart = load_font(22, bold=True)
+    font_footer = load_font(18, bold=False)
+
+    fill_color = class_color(flare_class)
+
+    # Flare magnitude
+    bbox = draw.textbbox((0, 0), flare_class, font=font_class)
+    text_w = bbox[2] - bbox[0]
+    x_class = (template.width - text_w) // 2
+    y_class = 520
+    draw_glow_text(template, (x_class, y_class), flare_class, font_class, fill_color)
+
+    # Info lines
+    line1 = f"Start : {start_str}      Peak : {peak_str}"
+    line2 = f"End : {end_str}      Duration : {duration_str}"
+
+    bbox1 = draw.textbbox((0, 0), line1, font=font_info)
+    bbox2 = draw.textbbox((0, 0), line2, font=font_info)
+
+    x1 = (template.width - (bbox1[2] - bbox1[0])) // 2
+    x2 = (template.width - (bbox2[2] - bbox2[0])) // 2
+
+    draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
+    draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
+
+    # Chart label placeholder for now
+    chart_title = f"{satellite} X-Ray Flux (Last 6 Hours)"
+    bbox_chart = draw.textbbox((0, 0), chart_title, font=font_chart)
+    x_chart = (template.width - (bbox_chart[2] - bbox_chart[0])) // 2
+    draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
+
+    # Footer
+    footer = f"Data: NOAA SWPC • Satellite: {satellite}"
+    bbox_footer = draw.textbbox((0, 0), footer, font=font_footer)
+    x_footer = (template.width - (bbox_footer[2] - bbox_footer[0])) // 2
+    draw.text((x_footer, template.height - 36), footer, font=font_footer, fill=(220, 220, 220, 255))
+
+    filename = f"flare_{peak_dt.strftime('%Y%m%d_%H%M')}_{flare_class.replace('.', 'p')}.png"
+    output_path = os.path.join(CARDS_DIR, filename)
+    template.convert("RGB").save(output_path)
+    return output_path
+
+
+def main():
+    ensure_dirs()
+    latest = fetch_latest_flare()
+    current_id = flare_id(latest)
+    previous_id = read_last_flare_id()
+
+    if current_id == previous_id:
+        print("No new flare detected. Nothing to do.")
+        return
+
+    output = render_card(latest)
+    write_last_flare_id(current_id)
+    prune_old_cards()
+    print(f"Generated: {output}")
+
+
+if __name__ == "__main__":
+    main()
