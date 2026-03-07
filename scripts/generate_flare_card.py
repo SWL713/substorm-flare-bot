@@ -182,7 +182,7 @@ def build_chart(flare: dict, output_path: str):
 
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
-    # Show 3 hours before flare peak up to now,
+    # show 3 hours before flare peak up to now,
     # but cap post-flare region at 90 minutes after peak
     window_start = peak_time - timedelta(hours=3)
     ideal_window_end = peak_time + timedelta(minutes=90)
@@ -196,21 +196,21 @@ def build_chart(flare: dict, output_path: str):
         if window_start <= t <= window_end
     ]
 
-    # fallback if filtering gets too narrow
     if len(filtered) < 10:
         filtered = list(zip(times, fluxes))
 
     plot_times = [t for t, _ in filtered]
     plot_fluxes = [f for _, f in filtered]
 
-    plt.figure(figsize=(8.2, 4.4))
-    ax = plt.gca()
-    ax.set_facecolor((0.03, 0.03, 0.07, 0.5))
-    plt.gcf().patch.set_facecolor((0.03, 0.03, 0.07, 0))
+    fig, ax = plt.subplots(figsize=(8.2, 4.4))
 
-    # Glow line and main line
-    ax.plot(plot_times, plot_fluxes, linewidth=6, color="#ffe9a8", alpha=0.12)
-    ax.plot(plot_times, plot_fluxes, linewidth=2.5, color="#ffe9a8")
+    # Fully transparent figure + axes
+    fig.patch.set_alpha(0.0)
+    ax.set_facecolor((0, 0, 0, 0))
+
+    # Glow line + main line
+    ax.plot(plot_times, plot_fluxes, linewidth=8, color="#ffe9a8", alpha=0.10, solid_capstyle="round")
+    ax.plot(plot_times, plot_fluxes, linewidth=2.5, color="#ffe9a8", solid_capstyle="round")
 
     ax.set_yscale("log")
     ax.set_ylim(1e-8, 1e-4)
@@ -224,13 +224,14 @@ def build_chart(flare: dict, output_path: str):
     ]
 
     for value, label, color in thresholds:
-        ax.axhline(value, color=color, linewidth=0.8, alpha=0.55)
+        ax.axhline(value, color=color, linewidth=0.9, alpha=0.45)
 
     ax.set_yticks([1e-8, 1e-7, 1e-6, 1e-5, 1e-4])
     ax.set_yticklabels(["A", "B", "C", "M", "X"], color="#f5dfb0", fontsize=11)
 
-    ax.grid(True, which="major", linestyle="-", linewidth=0.6, alpha=0.35, color="#ffffff")
-    ax.grid(True, which="minor", linestyle="-", linewidth=0.25, alpha=0.12, color="#ffffff")
+    # Lighter grid so background shows through
+    ax.grid(True, which="major", linestyle="-", linewidth=0.6, alpha=0.18, color="#ffffff")
+    ax.grid(True, which="minor", linestyle="-", linewidth=0.25, alpha=0.06, color="#ffffff")
 
     ax.tick_params(axis="x", colors="#f5dfb0", labelsize=10)
     ax.tick_params(axis="y", colors="#f5dfb0", labelsize=11)
@@ -239,7 +240,7 @@ def build_chart(flare: dict, output_path: str):
         nearest_idx = min(range(len(plot_times)), key=lambda i: abs((plot_times[i] - peak_time).total_seconds()))
         peak_flux = plot_fluxes[nearest_idx]
 
-        ax.axvline(peak_time, color="#ffb347", linewidth=1.0, alpha=0.7)
+        ax.axvline(peak_time, color="#ffb347", linewidth=1.0, alpha=0.6)
         ax.scatter([peak_time], [peak_flux], s=50, color="#ffd27a", zorder=5)
         ax.text(
             peak_time,
@@ -252,13 +253,20 @@ def build_chart(flare: dict, output_path: str):
             va="bottom",
         )
 
+    # Make spines subtle instead of a dark box
     for spine in ax.spines.values():
         spine.set_color("#c9b27a")
-        spine.set_alpha(0.35)
+        spine.set_alpha(0.22)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=200, bbox_inches="tight", facecolor=plt.gcf().get_facecolor())
-    plt.close()
+    plt.savefig(
+        output_path,
+        dpi=200,
+        bbox_inches="tight",
+        transparent=True,
+        pad_inches=0.02
+    )
+    plt.close(fig)
 
 
 def prune_old_cards():
