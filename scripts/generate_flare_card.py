@@ -205,8 +205,8 @@ def build_chart(flare: dict, output_path: str):
 
     plt.figure(figsize=(8.2, 4.4))
     ax = plt.gca()
-    ax.set_facecolor((0.03, 0.03, 0.07))
-    plt.gcf().patch.set_facecolor((0.03, 0.03, 0.07))
+    ax.set_facecolor((0.03, 0.03, 0.07, 0.5))
+    plt.gcf().patch.set_facecolor((0.03, 0.03, 0.07, 0))
 
     # Glow line and main line
     ax.plot(plot_times, plot_fluxes, linewidth=6, color="#ffe9a8", alpha=0.12)
