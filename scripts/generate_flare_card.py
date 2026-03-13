@@ -92,7 +92,6 @@ def fetch_xray_series():
     if not times:
         raise RuntimeError("No valid X-ray time series data found.")
 
-    # Remove obvious bad points / instrument glitches
     clean_times = []
     clean_fluxes = []
 
@@ -119,7 +118,6 @@ def fetch_xray_series():
     if not clean_times:
         raise RuntimeError("All X-ray points were filtered out.")
 
-    # light smoothing
     flux_arr = np.array(clean_fluxes)
     if len(flux_arr) >= 5:
         flux_arr = np.convolve(flux_arr, np.ones(5) / 5, mode="same")
@@ -177,15 +175,15 @@ def build_chart(flare: dict, output_path: str):
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
     # Chart window:
-    # 45 minutes before flare peak and up to 30 minutes after peak,
+    # 10 minutes before flare peak and up to 10 minutes after peak,
     # but never beyond the current time
-    window_start = peak_time - timedelta(minutes=45)
-    ideal_window_end = peak_time + timedelta(minutes=30)
+    window_start = peak_time - timedelta(minutes=10)
+    ideal_window_end = peak_time + timedelta(minutes=10)
     window_end = min(now_utc, ideal_window_end)
 
     # safety fallback in case of bad timestamps
     if window_end <= window_start:
-        window_start = now_utc - timedelta(minutes=45)
+        window_start = now_utc - timedelta(minutes=10)
         window_end = now_utc
 
     filtered = [
@@ -203,7 +201,6 @@ def build_chart(flare: dict, output_path: str):
     fig.patch.set_alpha(0.0)
     ax.set_facecolor((0, 0, 0, 0))
 
-    # glow line + main line
     ax.plot(plot_times, plot_fluxes, linewidth=8, color="#ffe9a8", alpha=0.10, solid_capstyle="round")
     ax.plot(plot_times, plot_fluxes, linewidth=2.5, color="#ffe9a8", solid_capstyle="round")
 
@@ -314,7 +311,7 @@ def render_card(flare: dict):
     draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
     draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
-    chart_title = f"{satellite} X-Ray Flux (−45m / +30m around flare)"
+    chart_title = f"{satellite} X-Ray Flux (−10m / +10m around flare)"
     bbox_chart = draw.textbbox((0, 0), chart_title, font=font_chart)
     x_chart = (template.width - (bbox_chart[2] - bbox_chart[0])) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
