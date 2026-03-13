@@ -174,13 +174,13 @@ def build_chart(flare: dict, output_path: str):
 
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
-    # Chart window: 20 minutes before peak and up to 10 minutes after
-    window_start = peak_time - timedelta(minutes=20)
-    ideal_window_end = peak_time + timedelta(minutes=10)
+    # Chart window: 40 minutes before peak and up to 20 minutes after
+    window_start = peak_time - timedelta(minutes=40)
+    ideal_window_end = peak_time + timedelta(minutes=20)
     window_end = min(now_utc, ideal_window_end)
 
     if window_end <= window_start:
-        window_start = now_utc - timedelta(minutes=20)
+        window_start = now_utc - timedelta(minutes=40)
         window_end = now_utc
 
     filtered = [(t, f) for t, f in zip(times, fluxes) if window_start <= t <= window_end]
@@ -283,26 +283,26 @@ def render_card(flare: dict):
     line1 = f"Start : {start_str}      Peak : {peak_str}"
     line2 = f"End : {end_str}      Duration : {duration_str}"
 
-    x1 = (template.width - (draw.textbbox((0,0), line1, font=font_info)[2])) // 2
-    x2 = (template.width - (draw.textbbox((0,0), line2, font=font_info)[2])) // 2
+    x1 = (template.width - (draw.textbbox((0, 0), line1, font=font_info)[2])) // 2
+    x2 = (template.width - (draw.textbbox((0, 0), line2, font=font_info)[2])) // 2
 
-    draw.text((x1, 690), line1, font=font_info, fill=(230,230,230,255))
-    draw.text((x2, 735), line2, font=font_info, fill=(230,230,230,255))
+    draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
+    draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
-    chart_title = f"{satellite} X-Ray Flux (-20m / +10m around flare)"
-    x_chart = (template.width - draw.textbbox((0,0), chart_title, font=font_chart)[2]) // 2
-    draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240,220,170,255))
+    chart_title = f"{satellite} X-Ray Flux (-40m / +20m around flare)"
+    x_chart = (template.width - draw.textbbox((0, 0), chart_title, font=font_chart)[2]) // 2
+    draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
     chart_path = os.path.join(CHARTS_DIR, "latest_chart.png")
     build_chart(flare, chart_path)
 
     chart_img = Image.open(chart_path).convert("RGBA")
-    chart_img.thumbnail((870,395))
-    template.alpha_composite(chart_img, (105 + (870-chart_img.width)//2, 865 + (395-chart_img.height)//2))
+    chart_img.thumbnail((870, 395))
+    template.alpha_composite(chart_img, (105 + (870 - chart_img.width) // 2, 865 + (395 - chart_img.height) // 2))
 
     footer = f"Data: NOAA SWPC • Satellite: {satellite}"
-    x_footer = (template.width - draw.textbbox((0,0), footer, font=font_footer)[2]) // 2
-    draw.text((x_footer, template.height-36), footer, font=font_footer, fill=(220,220,220,255))
+    x_footer = (template.width - draw.textbbox((0, 0), footer, font=font_footer)[2]) // 2
+    draw.text((x_footer, template.height - 36), footer, font=font_footer, fill=(220, 220, 220, 255))
 
     filename = f"flare_{peak_dt.strftime('%Y%m%d_%H%M')}_{flare_class.replace('.','p')}.png"
     output_path = os.path.join(CARDS_DIR, filename)
