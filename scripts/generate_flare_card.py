@@ -174,22 +174,16 @@ def build_chart(flare: dict, output_path: str):
 
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
-    # Chart window:
-    # 10 minutes before flare peak and up to 10 minutes after peak,
-    # but never beyond the current time
-    window_start = peak_time - timedelta(minutes=10)
+    # Chart window: 20 minutes before peak and up to 10 minutes after
+    window_start = peak_time - timedelta(minutes=20)
     ideal_window_end = peak_time + timedelta(minutes=10)
     window_end = min(now_utc, ideal_window_end)
 
-    # safety fallback in case of bad timestamps
     if window_end <= window_start:
-        window_start = now_utc - timedelta(minutes=10)
+        window_start = now_utc - timedelta(minutes=20)
         window_end = now_utc
 
-    filtered = [
-        (t, f) for t, f in zip(times, fluxes)
-        if window_start <= t <= window_end
-    ]
+    filtered = [(t, f) for t, f in zip(times, fluxes) if window_start <= t <= window_end]
 
     if len(filtered) < 10:
         filtered = list(zip(times, fluxes))
@@ -249,13 +243,7 @@ def build_chart(flare: dict, output_path: str):
         spine.set_alpha(0.22)
 
     plt.tight_layout()
-    plt.savefig(
-        output_path,
-        dpi=200,
-        bbox_inches="tight",
-        transparent=True,
-        pad_inches=0.02
-    )
+    plt.savefig(output_path, dpi=200, bbox_inches="tight", transparent=True, pad_inches=0.02)
     plt.close(fig)
 
 
@@ -278,66 +266,45 @@ def render_card(flare: dict):
     peak_str = peak_dt.strftime("%H:%M UTC")
     end_str = end_dt.strftime("%H:%M UTC") if end_dt else "ONGOING"
 
-    if end_dt:
-        duration_minutes = int((end_dt - start_dt).total_seconds() // 60)
-        duration_str = f"{duration_minutes} Minutes"
-    else:
-        duration_str = "ONGOING"
-
+    duration_str = f"{int((end_dt - start_dt).total_seconds() // 60)} Minutes" if end_dt else "ONGOING"
     satellite = f"GOES-{flare.get('satellite', '??')}"
 
-    font_class = load_font(120, bold=True)
-    font_info = load_font(28, bold=False)
-    font_chart = load_font(22, bold=True)
-    font_footer = load_font(18, bold=False)
+    font_class = load_font(120, True)
+    font_info = load_font(28)
+    font_chart = load_font(22, True)
+    font_footer = load_font(18)
 
     fill_color = class_color(flare_class)
 
     bbox = draw.textbbox((0, 0), flare_class, font=font_class)
-    text_w = bbox[2] - bbox[0]
-    x_class = (template.width - text_w) // 2
-    y_class = 520
-    draw_glow_text(template, (x_class, y_class), flare_class, font_class, fill_color)
+    x_class = (template.width - (bbox[2] - bbox[0])) // 2
+    draw_glow_text(template, (x_class, 520), flare_class, font_class, fill_color)
 
     line1 = f"Start : {start_str}      Peak : {peak_str}"
     line2 = f"End : {end_str}      Duration : {duration_str}"
 
-    bbox1 = draw.textbbox((0, 0), line1, font=font_info)
-    bbox2 = draw.textbbox((0, 0), line2, font=font_info)
+    x1 = (template.width - (draw.textbbox((0,0), line1, font=font_info)[2])) // 2
+    x2 = (template.width - (draw.textbbox((0,0), line2, font=font_info)[2])) // 2
 
-    x1 = (template.width - (bbox1[2] - bbox1[0])) // 2
-    x2 = (template.width - (bbox2[2] - bbox2[0])) // 2
+    draw.text((x1, 690), line1, font=font_info, fill=(230,230,230,255))
+    draw.text((x2, 735), line2, font=font_info, fill=(230,230,230,255))
 
-    draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
-    draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
-
-    chart_title = f"{satellite} X-Ray Flux (−10m / +10m around flare)"
-    bbox_chart = draw.textbbox((0, 0), chart_title, font=font_chart)
-    x_chart = (template.width - (bbox_chart[2] - bbox_chart[0])) // 2
-    draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
+    chart_title = f"{satellite} X-Ray Flux (-20m / +10m around flare)"
+    x_chart = (template.width - draw.textbbox((0,0), chart_title, font=font_chart)[2]) // 2
+    draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240,220,170,255))
 
     chart_path = os.path.join(CHARTS_DIR, "latest_chart.png")
     build_chart(flare, chart_path)
 
     chart_img = Image.open(chart_path).convert("RGBA")
-
-    target_x = 105
-    target_y = 865
-    target_w = 870
-    target_h = 395
-
-    chart_img.thumbnail((target_w, target_h))
-    paste_x = target_x + (target_w - chart_img.width) // 2
-    paste_y = target_y + (target_h - chart_img.height) // 2
-
-    template.alpha_composite(chart_img, (paste_x, paste_y))
+    chart_img.thumbnail((870,395))
+    template.alpha_composite(chart_img, (105 + (870-chart_img.width)//2, 865 + (395-chart_img.height)//2))
 
     footer = f"Data: NOAA SWPC • Satellite: {satellite}"
-    bbox_footer = draw.textbbox((0, 0), footer, font=font_footer)
-    x_footer = (template.width - (bbox_footer[2] - bbox_footer[0])) // 2
-    draw.text((x_footer, template.height - 36), footer, font=font_footer, fill=(220, 220, 220, 255))
+    x_footer = (template.width - draw.textbbox((0,0), footer, font=font_footer)[2]) // 2
+    draw.text((x_footer, template.height-36), footer, font=font_footer, fill=(220,220,220,255))
 
-    filename = f"flare_{peak_dt.strftime('%Y%m%d_%H%M')}_{flare_class.replace('.', 'p')}.png"
+    filename = f"flare_{peak_dt.strftime('%Y%m%d_%H%M')}_{flare_class.replace('.','p')}.png"
     output_path = os.path.join(CARDS_DIR, filename)
     template.convert("RGB").save(output_path)
     return output_path
