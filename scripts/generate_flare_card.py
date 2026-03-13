@@ -176,15 +176,17 @@ def build_chart(flare: dict, output_path: str):
 
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
-    # New x-axis logic for fast alerts:
-    # 3 hours before peak, and up to 30 minutes after peak, but never beyond "now"
-    window_start = peak_time - timedelta(hours=3)
+    # Chart window:
+    # 45 minutes before flare peak and up to 30 minutes after peak,
+    # but never beyond the current time
+    window_start = peak_time - timedelta(minutes=45)
     ideal_window_end = peak_time + timedelta(minutes=30)
     window_end = min(now_utc, ideal_window_end)
 
-    # safety fallback
+    # safety fallback in case of bad timestamps
     if window_end <= window_start:
-        window_end = times[-1]
+        window_start = now_utc - timedelta(minutes=45)
+        window_end = now_utc
 
     filtered = [
         (t, f) for t, f in zip(times, fluxes)
@@ -312,7 +314,7 @@ def render_card(flare: dict):
     draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
     draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
-    chart_title = f"{satellite} X-Ray Flux (Last 6 Hours)"
+    chart_title = f"{satellite} X-Ray Flux (−45m / +30m around flare)"
     bbox_chart = draw.textbbox((0, 0), chart_title, font=font_chart)
     x_chart = (template.width - (bbox_chart[2] - bbox_chart[0])) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
