@@ -3,8 +3,8 @@ name: Substorm Flare Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 min — flare generator only
-    - cron: "0 0 * * *"     # midnight daily — also runs backfill
+    - cron: "*/5 * * * *"
+    - cron: "0 0 * * *"
 
 permissions:
   contents: write
@@ -43,7 +43,8 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git pull --rebase origin main
           git add cards/ data/processed_flares.json
-          git diff --cached --quiet || git commit -m "Update flare cards [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+          git diff --cached --quiet && echo "Nothing to commit" && exit 0
+          git pull --rebase origin main
+          git commit -m "Update flare cards [$(date -u '+%Y-%m-%d %H:%M UTC')]"
           git push
