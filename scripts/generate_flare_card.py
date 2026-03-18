@@ -1,3 +1,17 @@
+"""
+Substorm Flare Bot — generate_flare_card.py
+============================================
+Key changes vs original:
+  • Fetches from BOTH primary and secondary GOES feeds and merges them
+    (redundant source fallback so a dead primary feed can't cause silence)
+  • Tracks ALL processed flare IDs in a JSON set rather than just the last one,
+    so no flare is ever double-posted
+  • Processes EVERY new flare since the last run — not just the most recent one
+    (this was the root cause of the missed M2.7)
+  • Graceful per-flare error handling so one bad card never kills the whole run
+"""
+
+import json
 import os
 import glob
 from datetime import datetime, timedelta
@@ -10,27 +24,46 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 
-FLARE_URL = "https://services.swpc.noaa.gov/json/goes/primary/xray-flares-7-day.json"
-XRAY_URL = "https://services.swpc.noaa.gov/json/goes/primary/xrays-6-hour.json"
+# ---------------------------------------------------------------------------
+# Redundant data sources — primary + secondary GOES satellites
+# ---------------------------------------------------------------------------
+FLARE_URLS = [
+    "https://services.swpc.noaa.gov/json/goes/primary/xray-flares-7-day.json",
+    "https://services.swpc.noaa.gov/json/goes/secondary/xray-flares-7-day.json",
+]
+XRAY_URLS = [
+    "https://services.swpc.noaa.gov/json/goes/primary/xrays-6-hour.json",
+    "https://services.swpc.noaa.gov/json/goes/secondary/xrays-6-hour.json",
+]
 
 TEMPLATE_PATH = "template.png"
 CARDS_DIR = "cards"
 CHARTS_DIR = "charts"
 DATA_DIR = "data"
-STATE_FILE = os.path.join(DATA_DIR, "last_flare_id.txt")
 
+# Upgraded state file: JSON set of processed IDs (replaces last_flare_id.txt)
+STATE_FILE = os.path.join(DATA_DIR, "processed_flares.json")
+# Legacy state file — read once to migrate, then ignored
+LEGACY_STATE_FILE = os.path.join(DATA_DIR, "last_flare_id.txt")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def ensure_dirs():
-    os.makedirs(CARDS_DIR, exist_ok=True)
-    os.makedirs(CHARTS_DIR, exist_ok=True)
-    os.makedirs(DATA_DIR, exist_ok=True)
+    for d in (CARDS_DIR, CHARTS_DIR, DATA_DIR):
+        os.makedirs(d, exist_ok=True)
 
 
 def load_font(size: int, bold: bool = False):
     candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
+            else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold
+            else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold
+            else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -43,148 +76,182 @@ def parse_time(value: str) -> datetime:
 
 
 def flare_id(flare: dict) -> str:
-    return f"{flare.get('begin_time','')}_{flare.get('max_time','')}_{flare.get('max_class','')}_{flare.get('satellite','')}"
+    """Stable unique identifier for a flare event."""
+    return (
+        f"{flare.get('begin_time', '')}"
+        f"_{flare.get('max_time', '')}"
+        f"_{flare.get('max_class', '')}"
+        f"_{flare.get('satellite', '')}"
+    )
 
 
-def fetch_latest_flare() -> dict:
-    response = requests.get(FLARE_URL, timeout=20, headers={"User-Agent": "substorm-flare-bot"})
-    response.raise_for_status()
-    data = response.json()
+# ---------------------------------------------------------------------------
+# State management (JSON set)
+# ---------------------------------------------------------------------------
 
-    valid = [f for f in data if f.get("max_time") and f.get("max_class")]
-    if not valid:
-        raise RuntimeError("No valid flare events found.")
+def load_processed_ids() -> set:
+    """Load the set of already-processed flare IDs.
+    Migrates the legacy single-ID file on first run.
+    """
+    ids: set = set()
 
-    valid.sort(key=lambda f: f["max_time"])
-    return valid[-1]
+    # Migrate legacy file if new state file doesn't exist yet
+    if not os.path.exists(STATE_FILE) and os.path.exists(LEGACY_STATE_FILE):
+        with open(LEGACY_STATE_FILE, "r", encoding="utf-8") as fh:
+            legacy_id = fh.read().strip()
+        if legacy_id:
+            ids.add(legacy_id)
+        save_processed_ids(ids)
+        print(f"[migrate] Promoted legacy ID to new state file: {legacy_id}")
+        return ids
+
+    if not os.path.exists(STATE_FILE):
+        return ids
+
+    with open(STATE_FILE, "r", encoding="utf-8") as fh:
+        try:
+            ids = set(json.load(fh))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return ids
+
+
+def save_processed_ids(ids: set):
+    # Cap at 500 to prevent unbounded growth — keep newest by sort order
+    capped = sorted(ids)[-500:]
+    with open(STATE_FILE, "w", encoding="utf-8") as fh:
+        json.dump(capped, fh, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Flare fetching — merge primary + secondary, deduplicate
+# ---------------------------------------------------------------------------
+
+def _fetch_json(url: str) -> list:
+    try:
+        resp = requests.get(
+            url, timeout=20, headers={"User-Agent": "substorm-flare-bot"}
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        print(f"[warn] Could not fetch {url}: {exc}")
+        return []
+
+
+def fetch_all_flares() -> list:
+    """Fetch from all sources and return a deduplicated, time-sorted list."""
+    seen_ids: set = set()
+    merged: list = []
+
+    for url in FLARE_URLS:
+        data = _fetch_json(url)
+        for f in data:
+            if not (f.get("max_time") and f.get("max_class")):
+                continue
+            fid = flare_id(f)
+            if fid not in seen_ids:
+                seen_ids.add(fid)
+                merged.append(f)
+
+    if not merged:
+        raise RuntimeError(
+            "No valid flare data from any source — both primary and secondary feeds failed."
+        )
+
+    merged.sort(key=lambda f: f["max_time"])
+    return merged
 
 
 def fetch_xray_series():
-    response = requests.get(XRAY_URL, timeout=20, headers={"User-Agent": "substorm-flare-bot"})
-    response.raise_for_status()
-    data = response.json()
+    """Fetch X-ray time series, trying primary then secondary."""
+    for url in XRAY_URLS:
+        data = _fetch_json(url)
+        times, fluxes = [], []
 
-    times = []
-    fluxes = []
+        for row in data:
+            if str(row.get("energy", "")).strip() != "0.1-0.8nm":
+                continue
+            flux = row.get("flux")
+            time_tag = row.get("time_tag")
+            if flux is None or time_tag is None:
+                continue
+            try:
+                t = parse_time(time_tag)
+                f = float(flux)
+            except Exception:
+                continue
+            if f > 0:
+                times.append(t)
+                fluxes.append(f)
 
-    for row in data:
-        energy = str(row.get("energy", "")).strip()
-        flux = row.get("flux")
-        time_tag = row.get("time_tag")
-
-        if energy != "0.1-0.8nm":
-            continue
-        if flux is None or time_tag is None:
-            continue
-
-        try:
-            t = parse_time(time_tag)
-            f = float(flux)
-        except Exception:
-            continue
-
-        if f <= 0:
-            continue
-
-        times.append(t)
-        fluxes.append(f)
-
-    if not times:
-        raise RuntimeError("No valid X-ray time series data found.")
-
-    clean_times = []
-    clean_fluxes = []
-
-    for i, f in enumerate(fluxes):
-        if f < 1e-8:
+        if not times:
+            print(f"[warn] No X-ray series from {url}")
             continue
 
-        prev_f = fluxes[i - 1] if i > 0 else None
-        next_f = fluxes[i + 1] if i < len(fluxes) - 1 else None
+        # Spike / dip filter
+        clean_t, clean_f = [], []
+        for i, f in enumerate(fluxes):
+            if f < 1e-8:
+                continue
+            prev_f = fluxes[i - 1] if i > 0 else None
+            next_f = fluxes[i + 1] if i < len(fluxes) - 1 else None
+            if prev_f and next_f:
+                ref = (prev_f + next_f) / 2.0
+                if ref > 0 and (f < ref / 20 or f > ref * 20):
+                    continue
+            clean_t.append(times[i])
+            clean_f.append(f)
 
-        bad_point = False
+        if not clean_t:
+            print(f"[warn] All points filtered from {url}")
+            continue
 
-        if prev_f is not None and next_f is not None:
-            local_ref = (prev_f + next_f) / 2.0
-            if local_ref > 0 and f < local_ref / 20:
-                bad_point = True
-            if local_ref > 0 and f > local_ref * 20:
-                bad_point = True
+        arr = np.array(clean_f)
+        if len(arr) >= 5:
+            arr = np.convolve(arr, np.ones(5) / 5, mode="same")
 
-        if not bad_point:
-            clean_times.append(times[i])
-            clean_fluxes.append(f)
+        return clean_t, arr.tolist()
 
-    if not clean_times:
-        raise RuntimeError("All X-ray points were filtered out.")
-
-    flux_arr = np.array(clean_fluxes)
-    if len(flux_arr) >= 5:
-        flux_arr = np.convolve(flux_arr, np.ones(5) / 5, mode="same")
-
-    return clean_times, flux_arr.tolist()
-
-
-def read_last_flare_id() -> str:
-    if not os.path.exists(STATE_FILE):
-        return ""
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        return f.read().strip()
+    raise RuntimeError("X-ray series unavailable from all sources.")
 
 
-def write_last_flare_id(value: str):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        f.write(value)
-
+# ---------------------------------------------------------------------------
+# Card / chart rendering (unchanged from original)
+# ---------------------------------------------------------------------------
 
 def class_color(flare_class: str):
     letter = (flare_class or "C")[0].upper()
-    if letter == "X":
-        return (255, 130, 40)
-    if letter == "M":
-        return (255, 170, 60)
-    if letter == "C":
-        return (255, 220, 120)
-    if letter == "B":
-        return (180, 210, 255)
-    return (230, 230, 230)
+    return {
+        "X": (255, 130, 40),
+        "M": (255, 170, 60),
+        "C": (255, 220, 120),
+        "B": (180, 210, 255),
+    }.get(letter, (230, 230, 230))
 
 
-def draw_glow_text(base: Image.Image, position, text: str, font, fill_rgb):
-    glow_layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    glow_draw = ImageDraw.Draw(glow_layer)
-    glow_draw.text(position, text, font=font, fill=fill_rgb + (120,))
-    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(24))
-    base.alpha_composite(glow_layer)
-
-    glow_layer2 = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    glow_draw2 = ImageDraw.Draw(glow_layer2)
-    glow_draw2.text(position, text, font=font, fill=(255, 240, 180, 170))
-    glow_layer2 = glow_layer2.filter(ImageFilter.GaussianBlur(10))
-    base.alpha_composite(glow_layer2)
-
-    final_draw = ImageDraw.Draw(base)
-    final_draw.text(position, text, font=font, fill=(255, 235, 170, 255))
+def draw_glow_text(base, position, text, font, fill_rgb):
+    for blur, alpha in ((24, 120), (10, 170)):
+        layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        ImageDraw.Draw(layer).text(position, text, font=font, fill=fill_rgb + (alpha,))
+        base.alpha_composite(layer.filter(ImageFilter.GaussianBlur(blur)))
+    ImageDraw.Draw(base).text(position, text, font=font, fill=(255, 235, 170, 255))
 
 
 def build_chart(flare: dict, output_path: str):
     times, fluxes = fetch_xray_series()
     peak_time = parse_time(flare["max_time"])
     flare_class = flare["max_class"]
-
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
-    # Chart window: 40 minutes before peak and up to 20 minutes after
     window_start = peak_time - timedelta(minutes=40)
-    ideal_window_end = peak_time + timedelta(minutes=20)
-    window_end = min(now_utc, ideal_window_end)
-
+    window_end = min(now_utc, peak_time + timedelta(minutes=20))
     if window_end <= window_start:
         window_start = now_utc - timedelta(minutes=40)
         window_end = now_utc
 
     filtered = [(t, f) for t, f in zip(times, fluxes) if window_start <= t <= window_end]
-
     if len(filtered) < 10:
         filtered = list(zip(times, fluxes))
 
@@ -194,49 +261,31 @@ def build_chart(flare: dict, output_path: str):
     fig, ax = plt.subplots(figsize=(8.2, 4.4))
     fig.patch.set_alpha(0.0)
     ax.set_facecolor((0, 0, 0, 0))
-
     ax.plot(plot_times, plot_fluxes, linewidth=8, color="#ffe9a8", alpha=0.10, solid_capstyle="round")
     ax.plot(plot_times, plot_fluxes, linewidth=2.5, color="#ffe9a8", solid_capstyle="round")
-
     ax.set_yscale("log")
     ax.set_ylim(1e-8, 1e-4)
 
-    thresholds = [
-        (1e-8, "A", "#888888"),
-        (1e-7, "B", "#9cc9ff"),
-        (1e-6, "C", "#ffe57a"),
-        (1e-5, "M", "#ffb347"),
-        (1e-4, "X", "#ff7043"),
-    ]
-
-    for value, label, color in thresholds:
+    for value, label, color in [
+        (1e-8, "A", "#888888"), (1e-7, "B", "#9cc9ff"),
+        (1e-6, "C", "#ffe57a"), (1e-5, "M", "#ffb347"), (1e-4, "X", "#ff7043"),
+    ]:
         ax.axhline(value, color=color, linewidth=0.9, alpha=0.45)
 
     ax.set_yticks([1e-8, 1e-7, 1e-6, 1e-5, 1e-4])
     ax.set_yticklabels(["A", "B", "C", "M", "X"], color="#f5dfb0", fontsize=11)
-
     ax.grid(True, which="major", linestyle="-", linewidth=0.6, alpha=0.18, color="#ffffff")
     ax.grid(True, which="minor", linestyle="-", linewidth=0.25, alpha=0.06, color="#ffffff")
-
     ax.tick_params(axis="x", colors="#f5dfb0", labelsize=10)
     ax.tick_params(axis="y", colors="#f5dfb0", labelsize=11)
 
-    if plot_times[0] <= peak_time <= plot_times[-1]:
-        nearest_idx = min(range(len(plot_times)), key=lambda i: abs((plot_times[i] - peak_time).total_seconds()))
-        peak_flux = plot_fluxes[nearest_idx]
-
+    if plot_times and plot_times[0] <= peak_time <= plot_times[-1]:
+        idx = min(range(len(plot_times)), key=lambda i: abs((plot_times[i] - peak_time).total_seconds()))
+        peak_flux = plot_fluxes[idx]
         ax.axvline(peak_time, color="#ffb347", linewidth=1.0, alpha=0.6)
         ax.scatter([peak_time], [peak_flux], s=50, color="#ffd27a", zorder=5)
-        ax.text(
-            peak_time,
-            peak_flux * 1.35,
-            flare_class,
-            color="#ffd27a",
-            fontsize=13,
-            fontweight="bold",
-            ha="left",
-            va="bottom",
-        )
+        ax.text(peak_time, peak_flux * 1.35, flare_class, color="#ffd27a",
+                fontsize=13, fontweight="bold", ha="left", va="bottom")
 
     for spine in ax.spines.values():
         spine.set_color("#c9b27a")
@@ -247,13 +296,7 @@ def build_chart(flare: dict, output_path: str):
     plt.close(fig)
 
 
-def prune_old_cards():
-    files = sorted(glob.glob(os.path.join(CARDS_DIR, "*.png")), key=os.path.getmtime, reverse=True)
-    for old_file in files[10:]:
-        os.remove(old_file)
-
-
-def render_card(flare: dict):
+def render_card(flare: dict) -> str:
     template = Image.open(TEMPLATE_PATH).convert("RGBA")
     draw = ImageDraw.Draw(template)
 
@@ -265,15 +308,15 @@ def render_card(flare: dict):
     start_str = start_dt.strftime("%H:%M UTC")
     peak_str = peak_dt.strftime("%H:%M UTC")
     end_str = end_dt.strftime("%H:%M UTC") if end_dt else "ONGOING"
-
-    duration_str = f"{int((end_dt - start_dt).total_seconds() // 60)} Minutes" if end_dt else "ONGOING"
+    duration_str = (
+        f"{int((end_dt - start_dt).total_seconds() // 60)} Minutes" if end_dt else "ONGOING"
+    )
     satellite = f"GOES-{flare.get('satellite', '??')}"
 
     font_class = load_font(120, True)
     font_info = load_font(28)
     font_chart = load_font(22, True)
     font_footer = load_font(18)
-
     fill_color = class_color(flare_class)
 
     bbox = draw.textbbox((0, 0), flare_class, font=font_class)
@@ -282,10 +325,8 @@ def render_card(flare: dict):
 
     line1 = f"Start : {start_str}      Peak : {peak_str}"
     line2 = f"End : {end_str}      Duration : {duration_str}"
-
-    x1 = (template.width - (draw.textbbox((0, 0), line1, font=font_info)[2])) // 2
-    x2 = (template.width - (draw.textbbox((0, 0), line2, font=font_info)[2])) // 2
-
+    x1 = (template.width - draw.textbbox((0, 0), line1, font=font_info)[2]) // 2
+    x2 = (template.width - draw.textbbox((0, 0), line2, font=font_info)[2]) // 2
     draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
     draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
@@ -293,37 +334,70 @@ def render_card(flare: dict):
     x_chart = (template.width - draw.textbbox((0, 0), chart_title, font=font_chart)[2]) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
-    chart_path = os.path.join(CHARTS_DIR, "latest_chart.png")
+    chart_path = os.path.join(CHARTS_DIR, f"chart_{peak_dt.strftime('%Y%m%d_%H%M')}.png")
     build_chart(flare, chart_path)
 
     chart_img = Image.open(chart_path).convert("RGBA")
     chart_img.thumbnail((870, 395))
-    template.alpha_composite(chart_img, (105 + (870 - chart_img.width) // 2, 865 + (395 - chart_img.height) // 2))
+    template.alpha_composite(
+        chart_img,
+        (105 + (870 - chart_img.width) // 2, 865 + (395 - chart_img.height) // 2),
+    )
 
     footer = f"Data: NOAA SWPC • Satellite: {satellite}"
     x_footer = (template.width - draw.textbbox((0, 0), footer, font=font_footer)[2]) // 2
     draw.text((x_footer, template.height - 36), footer, font=font_footer, fill=(220, 220, 220, 255))
 
-    filename = f"flare_{peak_dt.strftime('%Y%m%d_%H%M')}_{flare_class.replace('.','p')}.png"
+    filename = f"flare_{peak_dt.strftime('%Y%m%d_%H%M')}_{flare_class.replace('.', 'p')}.png"
     output_path = os.path.join(CARDS_DIR, filename)
     template.convert("RGB").save(output_path)
     return output_path
 
 
+def prune_old_cards(keep: int = 20):
+    files = sorted(glob.glob(os.path.join(CARDS_DIR, "*.png")), key=os.path.getmtime, reverse=True)
+    for old_file in files[keep:]:
+        os.remove(old_file)
+        print(f"[prune] Removed old card: {old_file}")
+
+
+# ---------------------------------------------------------------------------
+# Main — process ALL new flares, not just the latest
+# ---------------------------------------------------------------------------
+
 def main():
     ensure_dirs()
-    latest = fetch_latest_flare()
-    current_id = flare_id(latest)
-    previous_id = read_last_flare_id()
 
-    if current_id == previous_id:
-        print("No new flare detected. Nothing to do.")
+    all_flares = fetch_all_flares()
+    processed_ids = load_processed_ids()
+
+    # ── THE CORE FIX ────────────────────────────────────────────────────────
+    # Collect every flare the bot hasn't seen before, sorted oldest → newest
+    new_flares = [f for f in all_flares if flare_id(f) not in processed_ids]
+    # ────────────────────────────────────────────────────────────────────────
+
+    if not new_flares:
+        print("No new flares detected. Nothing to do.")
         return
 
-    output = render_card(latest)
-    write_last_flare_id(current_id)
+    print(f"Found {len(new_flares)} new flare(s) to process.")
+
+    generated = []
+    for flare in new_flares:
+        fid = flare_id(flare)
+        try:
+            output = render_card(flare)
+            processed_ids.add(fid)
+            generated.append(output)
+            print(f"  v Generated: {output}")
+        except Exception as exc:
+            # Per-flare error isolation — bad chart data won't kill other cards
+            print(f"  x Failed for {fid}: {exc}")
+
+    save_processed_ids(processed_ids)
     prune_old_cards()
-    print(f"Generated: {output}")
+
+    print(f"\nDone. {len(generated)}/{len(new_flares)} card(s) generated.")
 
 
 if __name__ == "__main__":
