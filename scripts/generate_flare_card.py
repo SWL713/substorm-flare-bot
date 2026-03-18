@@ -189,10 +189,10 @@ def build_chart(flare: dict, output_path: str, xray_times: list, xray_fluxes: li
     flare_class = flare["max_class"]
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
-    window_start = peak_time - timedelta(minutes=40)
-    window_end = min(now_utc, peak_time + timedelta(minutes=35))
+    window_start = peak_time - timedelta(minutes=30)
+    window_end = min(now_utc, peak_time + timedelta(minutes=30))
     if window_end <= window_start:
-        window_start = now_utc - timedelta(minutes=40)
+        window_start = now_utc - timedelta(minutes=30)
         window_end = now_utc
 
     filtered = [(t, f) for t, f in zip(xray_times, xray_fluxes) if window_start <= t <= window_end]
@@ -223,12 +223,14 @@ def build_chart(flare: dict, output_path: str, xray_times: list, xray_fluxes: li
     ax.tick_params(axis="x", colors="#f5dfb0", labelsize=10)
     ax.tick_params(axis="y", colors="#f5dfb0", labelsize=11)
 
-    if plot_times and plot_times[0] <= peak_time <= plot_times[-1]:
-        idx = min(range(len(plot_times)), key=lambda i: abs((plot_times[i] - peak_time).total_seconds()))
-        peak_flux = plot_fluxes[idx]
-        ax.axvline(peak_time, color="#ffb347", linewidth=1.0, alpha=0.6)
-        ax.scatter([peak_time], [peak_flux], s=50, color="#ffd27a", zorder=5)
-        ax.text(peak_time, peak_flux * 1.35, flare_class, color="#ffd27a",
+    if plot_times and plot_fluxes:
+        # Mark the actual maximum flux in the window, not just nearest to peak_time
+        max_idx = max(range(len(plot_fluxes)), key=lambda i: plot_fluxes[i])
+        max_time = plot_times[max_idx]
+        max_flux = plot_fluxes[max_idx]
+        ax.axvline(max_time, color="#ffb347", linewidth=1.0, alpha=0.6)
+        ax.scatter([max_time], [max_flux], s=50, color="#ffd27a", zorder=5)
+        ax.text(max_time, max_flux * 1.35, flare_class, color="#ffd27a",
                 fontsize=13, fontweight="bold", ha="left", va="bottom")
 
     for spine in ax.spines.values():
@@ -275,7 +277,7 @@ def render_card(flare: dict, xray_times: list, xray_fluxes: list) -> str:
     draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
     draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
-    chart_title = f"{satellite} X-Ray Flux (-40m / +35m around flare)"
+    chart_title = f"{satellite} X-Ray Flux (-30m / +30m around flare)"
     x_chart = (template.width - draw.textbbox((0, 0), chart_title, font=font_chart)[2]) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
