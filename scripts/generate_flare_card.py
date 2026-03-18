@@ -190,7 +190,7 @@ def build_chart(flare: dict, output_path: str, xray_times: list, xray_fluxes: li
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
     window_start = peak_time - timedelta(minutes=40)
-    window_end = min(now_utc, peak_time + timedelta(minutes=20))
+    window_end = min(now_utc, peak_time + timedelta(minutes=35))
     if window_end <= window_start:
         window_start = now_utc - timedelta(minutes=40)
         window_end = now_utc
@@ -275,7 +275,7 @@ def render_card(flare: dict, xray_times: list, xray_fluxes: list) -> str:
     draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
     draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
-    chart_title = f"{satellite} X-Ray Flux (-40m / +20m around flare)"
+    chart_title = f"{satellite} X-Ray Flux (-40m / +35m around flare)"
     x_chart = (template.width - draw.textbbox((0, 0), chart_title, font=font_chart)[2]) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
