@@ -300,7 +300,9 @@ def render_card(flare: dict, xray_times: list, xray_fluxes: list) -> str:
 
 
 def prune_old_cards(keep: int = 5):
-    files = sorted(glob.glob(os.path.join(CARDS_DIR, "*.png")), key=os.path.getmtime, reverse=True)
+    # Sort by the date embedded in the filename (flare_YYYYMMDD_HHMM_CLASS.png)
+    # so backfill regenerating old cards never bumps out genuinely recent ones
+    files = sorted(glob.glob(os.path.join(CARDS_DIR, "flare_*.png")), reverse=True)
     for old_file in files[keep:]:
         os.remove(old_file)
         print(f"[prune] Removed: {old_file}")
