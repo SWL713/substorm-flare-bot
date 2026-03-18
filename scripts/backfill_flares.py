@@ -87,7 +87,7 @@ def main():
             print(f"  x Failed for {fid}: {exc}")
 
     save_processed_ids(processed_ids)
-    prune_old_cards(keep=50)
+    prune_old_cards(keep=5)
     print(f"\nBackfill complete. {generated}/{len(candidates)} generated.")
 
 

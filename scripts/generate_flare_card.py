@@ -299,7 +299,7 @@ def render_card(flare: dict, xray_times: list, xray_fluxes: list) -> str:
     return output_path
 
 
-def prune_old_cards(keep: int = 20):
+def prune_old_cards(keep: int = 5):
     files = sorted(glob.glob(os.path.join(CARDS_DIR, "*.png")), key=os.path.getmtime, reverse=True)
     for old_file in files[keep:]:
         os.remove(old_file)
