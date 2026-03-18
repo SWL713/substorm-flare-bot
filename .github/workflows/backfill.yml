@@ -1,0 +1,50 @@
+name: Backfill Missing Flare Cards
+
+# Run manually from the Actions tab — never on a schedule
+on:
+  workflow_dispatch:
+    inputs:
+      min_class:
+        description: "Only backfill flares at or above this class (A/B/C/M/X)"
+        required: false
+        default: "A"
+      dry_run:
+        description: "Set to 'true' to list gaps without generating cards"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pillow matplotlib numpy
+
+      - name: Run backfill
+        run: |
+          ARGS="--min-class ${{ github.event.inputs.min_class }}"
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python scripts/backfill_flares.py $ARGS
+
+      - name: Commit backfilled cards
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add cards/ data/
+          git diff --cached --quiet || git commit -m "Backfill missing flare cards [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+          git push

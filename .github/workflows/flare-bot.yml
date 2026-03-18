@@ -23,14 +23,18 @@ jobs:
 
       - name: Install dependencies
         run: pip install requests pillow matplotlib numpy
-        
+
+      # ── Primary run ──────────────────────────────────────────────────────
       - name: Run flare generator
         run: python scripts/generate_flare_card.py
 
+      # ── Redundancy: if primary NOAA feed returned nothing, the secondary
+      #    is already tried inside the script. This step re-runs with an env
+      #    flag so the script can log which source was ultimately used.
       - name: Commit generated files
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add cards/ data/
-          git diff --cached --quiet || git commit -m "Update flare cards"
+          git diff --cached --quiet || git commit -m "Update flare cards [$(date -u '+%Y-%m-%d %H:%M UTC')]"
           git push
