@@ -1,0 +1,33 @@
+name: Monthly Cleanup
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"   # 1st of every month at midnight UTC
+  workflow_dispatch:       # also triggerable manually from Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run cleanup
+        run: python scripts/cleanup.py
+
+      - name: Commit cleaned state
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add cards/ data/
+          git diff --cached --quiet || git commit -m "Monthly cleanup [$(date -u '+%Y-%m-%d')]"
+          git push
