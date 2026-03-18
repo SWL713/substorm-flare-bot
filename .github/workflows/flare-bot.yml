@@ -3,7 +3,8 @@ name: Substorm Flare Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"   # every 5 min — flare generator only
+    - cron: "0 0 * * *"     # midnight daily — also runs backfill
 
 permissions:
   contents: write
@@ -21,13 +22,21 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-flarebot-v1
+          restore-keys: pip-flarebot-
+
       - name: Install dependencies
         run: pip install requests pillow matplotlib numpy
 
       - name: Run flare generator
         run: python scripts/generate_flare_card.py
 
-      - name: Backfill any missed flares
+      - name: Backfill missed flares (daily + manual only)
+        if: github.event.schedule == '0 0 * * *' || github.event_name == 'workflow_dispatch'
         run: python scripts/backfill_flares.py
 
       - name: Commit all generated files
