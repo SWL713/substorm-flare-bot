@@ -43,6 +43,7 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add cards/ data/
+          git pull --rebase origin main
+          git add cards/ data/processed_flares.json
           git diff --cached --quiet || git commit -m "Update flare cards [$(date -u '+%Y-%m-%d %H:%M UTC')]"
           git push
