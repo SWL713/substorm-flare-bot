@@ -1,14 +1,5 @@
 """
 Substorm Flare Bot — generate_flare_card.py
-============================================
-Key changes vs original:
-  • Fetches from BOTH primary and secondary GOES feeds and merges them
-    (redundant source fallback so a dead primary feed can't cause silence)
-  • Tracks ALL processed flare IDs in a JSON set rather than just the last one,
-    so no flare is ever double-posted
-  • Processes EVERY new flare since the last run — not just the most recent one
-    (this was the root cause of the missed M2.7)
-  • Graceful per-flare error handling so one bad card never kills the whole run
 """
 
 import json
@@ -24,9 +15,6 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 
-# ---------------------------------------------------------------------------
-# Redundant data sources — primary + secondary GOES satellites
-# ---------------------------------------------------------------------------
 FLARE_URLS = [
     "https://services.swpc.noaa.gov/json/goes/primary/xray-flares-7-day.json",
     "https://services.swpc.noaa.gov/json/goes/secondary/xray-flares-7-day.json",
@@ -40,16 +28,9 @@ TEMPLATE_PATH = "template.png"
 CARDS_DIR = "cards"
 CHARTS_DIR = "charts"
 DATA_DIR = "data"
-
-# Upgraded state file: JSON set of processed IDs (replaces last_flare_id.txt)
 STATE_FILE = os.path.join(DATA_DIR, "processed_flares.json")
-# Legacy state file — read once to migrate, then ignored
 LEGACY_STATE_FILE = os.path.join(DATA_DIR, "last_flare_id.txt")
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def ensure_dirs():
     for d in (CARDS_DIR, CHARTS_DIR, DATA_DIR):
@@ -76,7 +57,6 @@ def parse_time(value: str) -> datetime:
 
 
 def flare_id(flare: dict) -> str:
-    """Stable unique identifier for a flare event."""
     return (
         f"{flare.get('begin_time', '')}"
         f"_{flare.get('max_time', '')}"
@@ -85,54 +65,35 @@ def flare_id(flare: dict) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# State management (JSON set)
-# ---------------------------------------------------------------------------
-
 def load_processed_ids() -> set:
-    """Load the set of already-processed flare IDs.
-    Migrates the legacy single-ID file on first run.
-    """
     ids: set = set()
-
-    # Migrate legacy file if new state file doesn't exist yet
     if not os.path.exists(STATE_FILE) and os.path.exists(LEGACY_STATE_FILE):
         with open(LEGACY_STATE_FILE, "r", encoding="utf-8") as fh:
             legacy_id = fh.read().strip()
         if legacy_id:
             ids.add(legacy_id)
         save_processed_ids(ids)
-        print(f"[migrate] Promoted legacy ID to new state file: {legacy_id}")
+        print(f"[migrate] Promoted legacy ID: {legacy_id}")
         return ids
-
     if not os.path.exists(STATE_FILE):
         return ids
-
     with open(STATE_FILE, "r", encoding="utf-8") as fh:
         try:
             ids = set(json.load(fh))
         except (json.JSONDecodeError, TypeError):
             pass
-
     return ids
 
 
 def save_processed_ids(ids: set):
-    # Cap at 500 to prevent unbounded growth — keep newest by sort order
     capped = sorted(ids)[-500:]
     with open(STATE_FILE, "w", encoding="utf-8") as fh:
         json.dump(capped, fh, indent=2)
 
 
-# ---------------------------------------------------------------------------
-# Flare fetching — merge primary + secondary, deduplicate
-# ---------------------------------------------------------------------------
-
 def _fetch_json(url: str) -> list:
     try:
-        resp = requests.get(
-            url, timeout=20, headers={"User-Agent": "substorm-flare-bot"}
-        )
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "substorm-flare-bot"})
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:
@@ -141,35 +102,27 @@ def _fetch_json(url: str) -> list:
 
 
 def fetch_all_flares() -> list:
-    """Fetch from all sources and return a deduplicated, time-sorted list."""
     seen_ids: set = set()
     merged: list = []
-
     for url in FLARE_URLS:
-        data = _fetch_json(url)
-        for f in data:
+        for f in _fetch_json(url):
             if not (f.get("max_time") and f.get("max_class")):
                 continue
             fid = flare_id(f)
             if fid not in seen_ids:
                 seen_ids.add(fid)
                 merged.append(f)
-
     if not merged:
-        raise RuntimeError(
-            "No valid flare data from any source — both primary and secondary feeds failed."
-        )
-
+        raise RuntimeError("No valid flare data from any source.")
     merged.sort(key=lambda f: f["max_time"])
     return merged
 
 
 def fetch_xray_series():
-    """Fetch X-ray time series, trying primary then secondary."""
+    """Fetch X-ray series ONCE — result is passed to all cards in the run."""
     for url in XRAY_URLS:
         data = _fetch_json(url)
         times, fluxes = [], []
-
         for row in data:
             if str(row.get("energy", "")).strip() != "0.1-0.8nm":
                 continue
@@ -190,7 +143,6 @@ def fetch_xray_series():
             print(f"[warn] No X-ray series from {url}")
             continue
 
-        # Spike / dip filter
         clean_t, clean_f = [], []
         for i, f in enumerate(fluxes):
             if f < 1e-8:
@@ -205,30 +157,22 @@ def fetch_xray_series():
             clean_f.append(f)
 
         if not clean_t:
-            print(f"[warn] All points filtered from {url}")
             continue
 
         arr = np.array(clean_f)
         if len(arr) >= 5:
             arr = np.convolve(arr, np.ones(5) / 5, mode="same")
 
+        print(f"[xray] Loaded {len(clean_t)} points from {url}")
         return clean_t, arr.tolist()
 
     raise RuntimeError("X-ray series unavailable from all sources.")
 
 
-# ---------------------------------------------------------------------------
-# Card / chart rendering (unchanged from original)
-# ---------------------------------------------------------------------------
-
 def class_color(flare_class: str):
     letter = (flare_class or "C")[0].upper()
-    return {
-        "X": (255, 130, 40),
-        "M": (255, 170, 60),
-        "C": (255, 220, 120),
-        "B": (180, 210, 255),
-    }.get(letter, (230, 230, 230))
+    return {"X": (255, 130, 40), "M": (255, 170, 60),
+            "C": (255, 220, 120), "B": (180, 210, 255)}.get(letter, (230, 230, 230))
 
 
 def draw_glow_text(base, position, text, font, fill_rgb):
@@ -239,8 +183,8 @@ def draw_glow_text(base, position, text, font, fill_rgb):
     ImageDraw.Draw(base).text(position, text, font=font, fill=(255, 235, 170, 255))
 
 
-def build_chart(flare: dict, output_path: str):
-    times, fluxes = fetch_xray_series()
+def build_chart(flare: dict, output_path: str, xray_times: list, xray_fluxes: list):
+    """Build chart using pre-fetched X-ray data — no HTTP call here."""
     peak_time = parse_time(flare["max_time"])
     flare_class = flare["max_class"]
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
@@ -251,9 +195,9 @@ def build_chart(flare: dict, output_path: str):
         window_start = now_utc - timedelta(minutes=40)
         window_end = now_utc
 
-    filtered = [(t, f) for t, f in zip(times, fluxes) if window_start <= t <= window_end]
+    filtered = [(t, f) for t, f in zip(xray_times, xray_fluxes) if window_start <= t <= window_end]
     if len(filtered) < 10:
-        filtered = list(zip(times, fluxes))
+        filtered = list(zip(xray_times, xray_fluxes))
 
     plot_times = [t for t, _ in filtered]
     plot_fluxes = [f for _, f in filtered]
@@ -296,7 +240,8 @@ def build_chart(flare: dict, output_path: str):
     plt.close(fig)
 
 
-def render_card(flare: dict) -> str:
+def render_card(flare: dict, xray_times: list, xray_fluxes: list) -> str:
+    """Render a card using pre-fetched xray data."""
     template = Image.open(TEMPLATE_PATH).convert("RGBA")
     draw = ImageDraw.Draw(template)
 
@@ -335,7 +280,7 @@ def render_card(flare: dict) -> str:
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
     chart_path = os.path.join(CHARTS_DIR, f"chart_{peak_dt.strftime('%Y%m%d_%H%M')}.png")
-    build_chart(flare, chart_path)
+    build_chart(flare, chart_path, xray_times, xray_fluxes)
 
     chart_img = Image.open(chart_path).convert("RGBA")
     chart_img.thumbnail((870, 395))
@@ -358,45 +303,38 @@ def prune_old_cards(keep: int = 20):
     files = sorted(glob.glob(os.path.join(CARDS_DIR, "*.png")), key=os.path.getmtime, reverse=True)
     for old_file in files[keep:]:
         os.remove(old_file)
-        print(f"[prune] Removed old card: {old_file}")
+        print(f"[prune] Removed: {old_file}")
 
-
-# ---------------------------------------------------------------------------
-# Main — process ALL new flares, not just the latest
-# ---------------------------------------------------------------------------
 
 def main():
     ensure_dirs()
 
+    # ── Fetch everything ONCE upfront ────────────────────────────────────
     all_flares = fetch_all_flares()
+    xray_times, xray_fluxes = fetch_xray_series()
     processed_ids = load_processed_ids()
+    # ─────────────────────────────────────────────────────────────────────
 
-    # ── THE CORE FIX ────────────────────────────────────────────────────────
-    # Collect every flare the bot hasn't seen before, sorted oldest → newest
     new_flares = [f for f in all_flares if flare_id(f) not in processed_ids]
-    # ────────────────────────────────────────────────────────────────────────
 
     if not new_flares:
-        print("No new flares detected. Nothing to do.")
+        print("No new flares. Nothing to do.")
         return
 
-    print(f"Found {len(new_flares)} new flare(s) to process.")
-
+    print(f"Found {len(new_flares)} new flare(s).")
     generated = []
     for flare in new_flares:
         fid = flare_id(flare)
         try:
-            output = render_card(flare)
+            output = render_card(flare, xray_times, xray_fluxes)
             processed_ids.add(fid)
             generated.append(output)
             print(f"  v Generated: {output}")
         except Exception as exc:
-            # Per-flare error isolation — bad chart data won't kill other cards
             print(f"  x Failed for {fid}: {exc}")
 
     save_processed_ids(processed_ids)
     prune_old_cards()
-
     print(f"\nDone. {len(generated)}/{len(new_flares)} card(s) generated.")
 
 
