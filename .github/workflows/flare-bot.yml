@@ -1,50 +1,31 @@
 name: Substorm Flare Bot
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
-    - cron: "0 0 * * *"
+    - cron: '0 0,12 * * *'   # 2x per day — midnight and noon UTC
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  flare-bot:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 8
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-flarebot-v1
-          restore-keys: pip-flarebot-
-
-      - name: Install dependencies
-        run: pip install requests pillow matplotlib numpy
-
-      - name: Run flare generator
-        run: python scripts/generate_flare_card.py
-
-      - name: Backfill missed flares (daily + manual only)
-        if: github.event.schedule == '0 0 * * *' || github.event_name == 'workflow_dispatch'
-        run: python scripts/backfill_flares.py
-
-      - name: Commit all generated files
-        run: |
-          git config user.name "github-actions"
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt 2>/dev/null || pip install requests Pillow matplotlib numpy
+      - run: python scripts/generate_flare_card.py
+        env:
+          PYTHONUNBUFFERED: '1'
+      - run: |
+          git config user.name "Flare Bot"
           git config user.email "actions@github.com"
-          git add cards/ data/processed_flares.json
-          git diff --cached --quiet && echo "Nothing to commit" && exit 0
-          git commit -m "Update flare cards [$(date -u '+%Y-%m-%d %H:%M UTC')]"
-          git pull --rebase origin main
+          git add cards/ data/ || true
+          git diff --staged --quiet || git commit -m "flare: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git pull --rebase --autostash origin main
           git push
