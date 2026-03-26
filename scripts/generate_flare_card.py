@@ -57,11 +57,12 @@ def parse_time(value: str) -> datetime:
 
 
 def flare_id(flare: dict) -> str:
+    # Satellite intentionally excluded: both GOES-16 and GOES-18 can report the same
+    # physical flare, and we only want one card per event.
     return (
         f"{flare.get('begin_time', '')}"
         f"_{flare.get('max_time', '')}"
         f"_{flare.get('max_class', '')}"
-        f"_{flare.get('satellite', '')}"
     )
 
 
@@ -248,8 +249,8 @@ def render_card(flare: dict, xray_times: list, xray_fluxes: list) -> str:
     draw = ImageDraw.Draw(template)
 
     flare_class = flare["max_class"]
-    start_dt = parse_time(flare["begin_time"])
     peak_dt = parse_time(flare["max_time"])
+    start_dt = parse_time(flare["begin_time"]) if flare.get("begin_time") else peak_dt
     end_dt = parse_time(flare["end_time"]) if flare.get("end_time") else None
 
     start_str = start_dt.strftime("%H:%M UTC")

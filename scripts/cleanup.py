@@ -11,6 +11,7 @@ or manually: python scripts/cleanup.py
 import json
 import os
 import glob
+import re
 from datetime import datetime, timezone, timedelta
 
 CARDS_DIR = "cards"
@@ -29,8 +30,13 @@ def cleanup():
     cards = glob.glob(os.path.join(CARDS_DIR, "flare_*.png"))
     removed_cards = 0
     for card in cards:
-        mtime = datetime.fromtimestamp(os.path.getmtime(card), tz=timezone.utc)
-        if mtime < cutoff:
+        # Parse date from filename (flare_YYYYMMDD_HHMM_CLASS.png)
+        # checkout resets mtime so file timestamps are unreliable
+        m = re.match(r"flare_(\d{8})_(\d{4})_", os.path.basename(card))
+        if not m:
+            continue
+        file_dt = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+        if file_dt < cutoff:
             os.remove(card)
             print(f"  [card] Deleted: {card}")
             removed_cards += 1
