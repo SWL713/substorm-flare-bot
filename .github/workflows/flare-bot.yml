@@ -2,7 +2,7 @@ name: Substorm Flare Bot
 
 on:
   schedule:
-    - cron: '0 0,12 * * *'   # 2x per day — midnight and noon UTC
+    - cron: '0 */2 * * *'    # every 2 hours — catches flares shortly after NOAA closes them
   workflow_dispatch:
 
 permissions:
