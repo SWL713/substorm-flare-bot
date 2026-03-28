@@ -354,11 +354,33 @@ def find_active_event_for_flare(flare, active_events):
 
 # ── Chart ─────────────────────────────────────────────────────────────────────
 
-def _build_chart(peak_time, flare_class, chart_path, xray_times, xray_fluxes, inprogress=False):
+def _build_chart(peak_time, flare_class, chart_path, xray_times, xray_fluxes,
+                  inprogress=False, event_start=None):
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
-    window_start = peak_time - timedelta(minutes=30)
-    window_end   = min(now_utc, peak_time + timedelta(minutes=30))
+    # ── Adaptive window ───────────────────────────────────────────────────────
+    # Pre-peak  : 2× rise time (floor 15 min) — shows the full ramp
+    # Post-peak : 1.5× decay time (floor 30 min) — shows the tail
+    if event_start is not None:
+        rise_mins = max(15, (peak_time - event_start).total_seconds() / 60 * 2)
+    else:
+        rise_mins = 30
+
+    if inprogress:
+        decay_mins = max(30, (now_utc - peak_time).total_seconds() / 60 * 1.5)
+    else:
+        decay_mins = 30
+        peak_idx = next((i for i, t in enumerate(xray_times) if t >= peak_time), None)
+        if peak_idx is not None:
+            for i in range(peak_idx, len(xray_fluxes)):
+                if xray_fluxes[i] < 1e-6:
+                    decay_mins = max(30, (xray_times[i] - peak_time).total_seconds() / 60 * 1.5)
+                    break
+            else:
+                decay_mins = max(30, (xray_times[-1] - peak_time).total_seconds() / 60 * 1.5)
+
+    window_start = peak_time - timedelta(minutes=rise_mins)
+    window_end   = min(now_utc, peak_time + timedelta(minutes=decay_mins))
     if window_end <= window_start:
         window_start = now_utc - timedelta(hours=1)
         window_end   = now_utc
@@ -477,7 +499,8 @@ def render_inprogress_card(active, xray_times, xray_fluxes):
 
     chart_path = os.path.join(CHARTS_DIR,
                                f"chart_live_{start_time.strftime('%Y%m%d_%H%M')}.png")
-    _build_chart(peak_time, peak_class, chart_path, xray_times, xray_fluxes, inprogress=True)
+    _build_chart(peak_time, peak_class, chart_path, xray_times, xray_fluxes,
+                  inprogress=True, event_start=start_time)
     _composite_chart(template, chart_path)
 
     x_footer = (template.width - draw.textbbox((0, 0), footer_text, font=font_footer)[2]) // 2
@@ -535,7 +558,8 @@ def render_card(flare, xray_times, xray_fluxes):
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
     chart_path = os.path.join(CHARTS_DIR, f"chart_{peak_dt.strftime('%Y%m%d_%H%M')}.png")
-    _build_chart(peak_dt, flare_class, chart_path, xray_times, xray_fluxes, inprogress=False)
+    _build_chart(peak_dt, flare_class, chart_path, xray_times, xray_fluxes,
+                  inprogress=False, event_start=start_dt)
     _composite_chart(template, chart_path)
 
     footer = f"Data: NOAA SWPC  -  Satellite: {satellite}"
