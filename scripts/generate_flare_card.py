@@ -5,6 +5,7 @@ Substorm Flare Bot — generate_flare_card.py
 import json
 import os
 import glob
+import re
 from datetime import datetime, timedelta
 
 import requests
@@ -66,13 +67,19 @@ def flare_id(flare: dict) -> str:
     )
 
 
+def _normalize_id(fid: str) -> str:
+    """Strip legacy satellite suffix (e.g. '_18', '_19') so IDs always match
+    the current satellite-agnostic flare_id() format."""
+    return re.sub(r"_\d+$", "", fid)
+
+
 def load_processed_ids() -> set:
     ids: set = set()
     if not os.path.exists(STATE_FILE) and os.path.exists(LEGACY_STATE_FILE):
         with open(LEGACY_STATE_FILE, "r", encoding="utf-8") as fh:
             legacy_id = fh.read().strip()
         if legacy_id:
-            ids.add(legacy_id)
+            ids.add(_normalize_id(legacy_id))
         save_processed_ids(ids)
         print(f"[migrate] Promoted legacy ID: {legacy_id}")
         return ids
@@ -80,7 +87,8 @@ def load_processed_ids() -> set:
         return ids
     with open(STATE_FILE, "r", encoding="utf-8") as fh:
         try:
-            ids = set(json.load(fh))
+            raw = json.load(fh)
+            ids = set(_normalize_id(x) for x in raw)
         except (json.JSONDecodeError, TypeError):
             pass
     return ids
