@@ -240,60 +240,97 @@ def fetch_xray_series():
     raise RuntimeError("X-ray series unavailable from all sources.")
 
 
-# ── Live M/X detection ────────────────────────────────────────────────────────
+# ── M/X detection — scans full 6-hour history ─────────────────────────────────
 
-def detect_active_mx_flare(xray_times, xray_fluxes):
+def find_mx_events_in_series(xray_times, xray_fluxes, lookback_hours=6):
     """
-    Returns info about an ongoing M or X flare only.
-    Requires flux >= M1.0 sustained for INPROGRESS_SUSTAIN_MINS.
-    Returns None for anything below M class.
+    Scans the entire X-ray time series (up to lookback_hours) for distinct M or X
+    class events — whether currently active OR already peaked and declining.
+
+    Returns a list of event dicts, one per distinct M/X burst found, most recent first.
+    Each event has the same shape as the old detect_active_mx_flare() return value.
+
+    Logic:
+      - Walk the series looking for contiguous regions where flux >= M1.0.
+      - Each such region that lasted >= INPROGRESS_SUSTAIN_MINS is one event.
+      - Events separated by flux dropping below C-level are treated as distinct.
     """
     if not xray_times or not xray_fluxes:
-        return None
+        return []
 
-    current_flux = xray_fluxes[-1]
+    now     = xray_times[-1]
+    cutoff  = now - timedelta(hours=lookback_hours)
+    indices = [i for i, t in enumerate(xray_times) if t >= cutoff]
+    if not indices:
+        return []
 
-    # Hard gate: M and X only — C, B, A are ignored entirely
-    if current_flux < INPROGRESS_MIN_FLUX:
-        return None
+    events = []
+    in_burst     = False
+    burst_start  = None
+    burst_indices = []
 
-    # Walk backwards to find start of sustained rise
-    above_start_idx = len(xray_fluxes) - 1
-    for i in range(len(xray_fluxes) - 2, -1, -1):
-        if xray_fluxes[i] >= INPROGRESS_MIN_FLUX:
-            above_start_idx = i
+    for i in indices:
+        flux = xray_fluxes[i]
+        if flux >= INPROGRESS_MIN_FLUX:
+            if not in_burst:
+                in_burst = True
+                burst_start = i
+                burst_indices = []
+            burst_indices.append(i)
         else:
-            break
+            if in_burst:
+                # Close out this burst
+                _maybe_add_event(events, xray_times, xray_fluxes, burst_indices, now)
+                in_burst = False
+                burst_indices = []
 
-    sustained_mins = (xray_times[-1] - xray_times[above_start_idx]).total_seconds() / 60
-    if sustained_mins < INPROGRESS_SUSTAIN_MINS:
-        return None
+    # Handle burst still active at end of series
+    if in_burst and burst_indices:
+        _maybe_add_event(events, xray_times, xray_fluxes, burst_indices, now)
 
-    # Estimate event start: last reading below C before the rise
-    event_start = xray_times[above_start_idx]
-    for i in range(above_start_idx, -1, -1):
+    events.sort(key=lambda e: e["peak_time"], reverse=True)
+    return events
+
+
+def _maybe_add_event(events, xray_times, xray_fluxes, burst_indices, now):
+    """Build an event dict from a burst segment if it meets the minimum duration."""
+    duration_mins = (
+        xray_times[burst_indices[-1]] - xray_times[burst_indices[0]]
+    ).total_seconds() / 60
+
+    if duration_mins < INPROGRESS_SUSTAIN_MINS:
+        return  # Too brief — noise, not a real flare
+
+    peak_flux  = max(xray_fluxes[i] for i in burst_indices)
+    peak_idx   = next(i for i in burst_indices if xray_fluxes[i] == peak_flux)
+    peak_time  = xray_times[peak_idx]
+    peak_class = flux_to_class(peak_flux)
+
+    # Estimate event start: look back before the burst for the last sub-C reading
+    event_start = xray_times[burst_indices[0]]
+    for i in range(burst_indices[0], -1, -1):
         if xray_fluxes[i] < 1e-6:
             event_start = xray_times[min(i + 1, len(xray_times) - 1)]
             break
 
-    peak_flux  = max(xray_fluxes[above_start_idx:])
-    peak_idx   = xray_fluxes.index(peak_flux)
-    peak_time  = xray_times[peak_idx]
-    peak_class = flux_to_class(peak_flux)
+    current_flux  = xray_fluxes[burst_indices[-1]]
+    still_active  = burst_indices[-1] == len(xray_fluxes) - 1
 
-    print(f"[live] Active {peak_class} flare — sustained {sustained_mins:.1f} min, "
-          f"peak {peak_class} at {peak_time.strftime('%H:%M UTC')}")
+    status = "active" if still_active else "peaked"
+    print(f"[scan] {peak_class} event found — peak {peak_time.strftime('%H:%M UTC')}, "
+          f"duration {duration_mins:.0f} min, status: {status}")
 
-    return {
+    events.append({
         "event_start":    event_start.isoformat(),
         "peak_time":      peak_time.isoformat(),
         "peak_flux":      peak_flux,
         "peak_class":     peak_class,
         "current_flux":   current_flux,
         "current_class":  flux_to_class(current_flux),
-        "last_updated":   xray_times[-1].isoformat(),
+        "last_updated":   now.isoformat(),
+        "still_active":   still_active,
         "card_filename":  None,
-    }
+    })
 
 
 def active_event_already_carded(event_start_dt, active_events):
@@ -402,8 +439,16 @@ def render_inprogress_card(active, xray_times, xray_fluxes):
     current_class = active["current_class"]
     fill_color    = class_color(peak_class)
 
+    still_active = active.get("still_active", True)
+    banner_text  = ("  IN PROGRESS  -  UPDATING LIVE"
+                    if still_active else
+                    "  PEAKED  -  AWAITING NOAA CONFIRMATION")
+    footer_text  = ("Data: NOAA SWPC  -  Status: IN PROGRESS  -  card will update"
+                    if still_active else
+                    "Data: NOAA SWPC  -  Status: PEAKED  -  final card coming soon")
+
     draw_status_banner(template,
-                       text="  IN PROGRESS  -  UPDATING LIVE",
+                       text=banner_text,
                        bg_rgba=(160, 80, 0, 210),
                        text_rgba=(255, 210, 120, 255))
 
@@ -435,9 +480,8 @@ def render_inprogress_card(active, xray_times, xray_fluxes):
     _build_chart(peak_time, peak_class, chart_path, xray_times, xray_fluxes, inprogress=True)
     _composite_chart(template, chart_path)
 
-    footer = "Data: NOAA SWPC  -  Status: IN PROGRESS  -  card will update"
-    x_footer = (template.width - draw.textbbox((0, 0), footer, font=font_footer)[2]) // 2
-    draw.text((x_footer, template.height - 36), footer,
+    x_footer = (template.width - draw.textbbox((0, 0), footer_text, font=font_footer)[2]) // 2
+    draw.text((x_footer, template.height - 36), footer_text,
                font=font_footer, fill=(255, 180, 80, 255))
 
     filename    = (f"flare_{start_time.strftime('%Y%m%d_%H%M')}"
@@ -578,11 +622,16 @@ def main():
             print(f"  [fail] {fid}: {exc}")
 
     # ═══════════════════════════════════════════════════════════════════════
-    # STEP 2 — In-progress card for live M or X flare (M/X only)
+    # STEP 2 — In-progress/retrospective cards from X-ray history (M/X only)
+    # Scans the full 6-hour series — catches events whether currently active
+    # or already peaked and awaiting NOAA confirmation.
     # ═══════════════════════════════════════════════════════════════════════
-    active_flare = detect_active_mx_flare(xray_times, xray_fluxes)
+    mx_events = find_mx_events_in_series(xray_times, xray_fluxes)
 
-    if active_flare:
+    if not mx_events:
+        print("[scan] No M/X events found in X-ray history.")
+
+    for active_flare in mx_events:
         event_start_dt = datetime.fromisoformat(active_flare["event_start"])
         already        = active_event_already_carded(event_start_dt, active_events)
 
@@ -592,13 +641,12 @@ def main():
                 active_flare["card_filename"] = os.path.basename(output)
                 active_events.append(active_flare)
                 generated.append(output)
-                print(f"  [live] In-progress card: {output}")
+                status = "active" if active_flare.get("still_active") else "peaked — awaiting NOAA"
+                print(f"  [card] In-progress card ({status}): {output}")
             except Exception as exc:
                 print(f"  [fail] In-progress render: {exc}")
         else:
-            print(f"[live] In-progress card already exists for this event — skipping.")
-    else:
-        print("[live] No active M/X flare detected.")
+            print(f"[scan] Card already exists for event at {active_flare['event_start']} — skipping.")
 
     save_processed_ids(processed_ids)
     save_active_events(active_events)
