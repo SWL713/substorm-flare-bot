@@ -532,10 +532,7 @@ def render_card(flare, xray_times, xray_fluxes):
     duration_str = (f"{int((end_dt - start_dt).total_seconds() // 60)} Minutes"
                     if end_dt else "ONGOING")
 
-    draw_status_banner(template,
-                       text="  CONFIRMED  -  FINAL DATA",
-                       bg_rgba=(30, 120, 60, 210),
-                       text_rgba=(200, 255, 210, 255))
+
 
     font_class  = load_font(120, True)
     font_info   = load_font(28)
@@ -553,7 +550,7 @@ def render_card(flare, xray_times, xray_fluxes):
     draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
     draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
-    chart_title = f"{satellite} X-Ray Flux (-30m / +30m around flare)"
+    chart_title = f"{satellite} X-Ray Flux"
     x_chart = (template.width - draw.textbbox((0, 0), chart_title, font=font_chart)[2]) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
