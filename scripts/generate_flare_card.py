@@ -232,7 +232,12 @@ def fetch_xray_series():
 
         arr = np.array(clean_f)
         if len(arr) >= 5:
-            arr = np.convolve(arr, np.ones(5) / 5, mode="same")
+            smoothed = np.convolve(arr, np.ones(5) / 5, mode="same")
+            # Convolve in 'same' mode pads edges with zeros, causing artefacts
+            # for the first and last 2 points — restore originals there
+            smoothed[:2]  = arr[:2]
+            smoothed[-2:] = arr[-2:]
+            arr = smoothed
 
         print(f"[xray] Loaded {len(clean_t)} points from {url}")
         return clean_t, arr.tolist()
@@ -401,16 +406,25 @@ def _build_chart(peak_time, flare_class, chart_path, xray_times, xray_fluxes,
     ax.plot(plot_times, plot_fluxes, linewidth=8,   color=line_color, alpha=0.10, solid_capstyle="round")
     ax.plot(plot_times, plot_fluxes, linewidth=2.5, color=line_color, solid_capstyle="round")
     ax.set_yscale("log")
-    ax.set_ylim(1e-8, 1e-4)
 
-    for value, label, color in [
-        (1e-8, "A", "#888888"), (1e-7, "B", "#9cc9ff"),
-        (1e-6, "C", "#ffe57a"), (1e-5, "M", "#ffb347"), (1e-4, "X", "#ff7043"),
-    ]:
+    # Y-axis: floor at A-level, ceiling above the actual peak with headroom
+    y_max = max(1e-4, max(plot_fluxes) * 3) if plot_fluxes else 1e-4
+    ax.set_ylim(1e-8, y_max)
+
+    # Build tick labels — always show A/B/C/M/X, add X10 if peak reaches it
+    yticks  = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4]
+    ylabels = ["A",  "B",  "C",  "M",  "X"]
+    tick_colors = ["#888888", "#9cc9ff", "#ffe57a", "#ffb347", "#ff7043"]
+    if y_max > 1e-3:
+        yticks.append(1e-3)
+        ylabels.append("X10")
+        tick_colors.append("#ff3300")
+
+    for value, color in zip(yticks, tick_colors):
         ax.axhline(value, color=color, linewidth=0.9, alpha=0.45)
 
-    ax.set_yticks([1e-8, 1e-7, 1e-6, 1e-5, 1e-4])
-    ax.set_yticklabels(["A", "B", "C", "M", "X"], color="#f5dfb0", fontsize=11)
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(ylabels, color="#f5dfb0", fontsize=11)
     ax.grid(True, which="major", linestyle="-", linewidth=0.6, alpha=0.18, color="#ffffff")
     ax.grid(True, which="minor", linestyle="-", linewidth=0.25, alpha=0.06, color="#ffffff")
     ax.tick_params(axis="x", colors="#f5dfb0", labelsize=10)
@@ -422,7 +436,8 @@ def _build_chart(peak_time, flare_class, chart_path, xray_times, xray_fluxes,
         max_flux = plot_fluxes[max_idx]
         ax.axvline(max_time, color="#ffb347", linewidth=1.0, alpha=0.6)
         ax.scatter([max_time], [max_flux], s=50, color="#ffd27a", zorder=5)
-        ax.text(max_time, max_flux * 1.35, flare_class,
+        label_y = min(max_flux * 1.35, y_max * 0.75)
+        ax.text(max_time, label_y, flare_class,
                 color="#ffd27a", fontsize=13, fontweight="bold", ha="left", va="bottom")
 
     if inprogress and plot_times:
