@@ -1,27 +1,5 @@
 [
   {
-    "event_start": "2026-03-30T03:01:00+00:00",
-    "peak_time": "2026-03-30T03:19:00+00:00",
-    "peak_flux": 0.00014897323853801936,
-    "peak_class": "X1.5",
-    "current_flux": 1.0069397649203893e-05,
-    "current_class": "M1.0",
-    "last_updated": "2026-03-30T08:42:00+00:00",
-    "still_active": false,
-    "card_filename": "flare_20260330_0301_X1p5_inprogress.png"
-  },
-  {
-    "event_start": "2026-03-30T04:22:00+00:00",
-    "peak_time": "2026-03-30T04:22:00+00:00",
-    "peak_flux": 2.8527369067887776e-05,
-    "peak_class": "M2.9",
-    "current_flux": 1.0069397649203893e-05,
-    "current_class": "M1.0",
-    "last_updated": "2026-03-30T10:19:00+00:00",
-    "still_active": false,
-    "card_filename": "flare_20260330_0422_M2p9_inprogress.png"
-  },
-  {
     "event_start": "2026-03-30T04:52:00+00:00",
     "peak_time": "2026-03-30T04:52:00+00:00",
     "peak_flux": 1.808742672437802e-05,
