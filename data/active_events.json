@@ -1,13 +1,1 @@
-[
-  {
-    "event_start": "2026-04-02T16:44:00+00:00",
-    "peak_time": "2026-04-02T18:15:00+00:00",
-    "peak_flux": 3.54362819052767e-05,
-    "peak_class": "M3.5",
-    "current_flux": 3.541664773365483e-05,
-    "current_class": "M3.5",
-    "last_updated": "2026-04-02T18:16:00+00:00",
-    "still_active": true,
-    "card_filename": "flare_20260402_1644_M3p5_inprogress.png"
-  }
-]
+[]
