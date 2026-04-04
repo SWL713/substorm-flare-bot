@@ -20,5 +20,16 @@
     "last_updated": "2026-04-04T06:39:00+00:00",
     "still_active": false,
     "card_filename": "flare_20260404_0112_M6p9_inprogress.png"
+  },
+  {
+    "event_start": "2026-04-04T07:41:00+00:00",
+    "peak_time": "2026-04-04T07:58:00+00:00",
+    "peak_flux": 1.6765703185228632e-05,
+    "peak_class": "M1.7",
+    "current_flux": 1.0330817167414354e-05,
+    "current_class": "M1.0",
+    "last_updated": "2026-04-04T08:22:00+00:00",
+    "still_active": false,
+    "card_filename": "flare_20260404_0741_M1p7_inprogress.png"
   }
 ]
