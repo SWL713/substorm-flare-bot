@@ -829,26 +829,32 @@ def main():
 
 
 def send_telegram_photo(image_path, caption):
-    """Send a flare card image to the Telegram group."""
+    """Send a flare card image to the Telegram group + channel."""
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not bot_token or not chat_id:
+    chat_ids = [
+        os.environ.get("TELEGRAM_CHAT_ID"),
+        os.environ.get("TELEGRAM_CHANNEL_ID"),
+    ]
+    if not bot_token:
         return
-    try:
-        with open(image_path, "rb") as photo:
-            resp = requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendPhoto",
-                data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
-                files={"photo": photo},
-                timeout=30,
-            )
-        result = resp.json()
-        if result.get("ok"):
-            print(f"  [telegram] Alert sent: {os.path.basename(image_path)}")
-        else:
-            print(f"  [telegram] Send failed: {result}")
-    except Exception as e:
-        print(f"  [telegram] Error: {e}")
+    for chat_id in chat_ids:
+        if not chat_id:
+            continue
+        try:
+            with open(image_path, "rb") as photo:
+                resp = requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/sendPhoto",
+                    data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+                    files={"photo": photo},
+                    timeout=30,
+                )
+            result = resp.json()
+            if result.get("ok"):
+                print(f"  [telegram] Alert sent to {chat_id}: {os.path.basename(image_path)}")
+            else:
+                print(f"  [telegram] Send failed to {chat_id}: {result}")
+        except Exception as e:
+            print(f"  [telegram] Error sending to {chat_id}: {e}")
 
 
 if __name__ == "__main__":
