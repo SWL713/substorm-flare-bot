@@ -646,6 +646,14 @@ def main():
             generated.append(output)
             print(f"  [done] Completed card: {output}")
 
+            # Alert Telegram
+            fc = flare.get("max_class", "?")
+            peak_t = flare.get("max_time", "")[:16].replace("T", " ")
+            send_telegram_photo(output,
+                f"<b>Solar Flare — {fc}</b>\n"
+                f"Peak: {peak_t} UTC\n"
+                f"Confirmed by NOAA")
+
             # Remove the matching in-progress card
             matched = find_active_event_for_flare(flare, active_events)
             if matched:
@@ -679,6 +687,12 @@ def main():
                 active_flare["card_filename"] = os.path.basename(output)
                 active_events.append(active_flare)
                 generated.append(output)
+
+                # Alert Telegram
+                fc = active_flare.get("current_class", "M?")
+                send_telegram_photo(output,
+                    f"<b>Solar Flare IN PROGRESS — {fc}</b>\n"
+                    f"Detected in live X-ray data")
                 status = "active" if active_flare.get("still_active") else "peaked — awaiting NOAA"
                 print(f"  [card] In-progress card ({status}): {output}")
             except Exception as exc:
@@ -695,6 +709,29 @@ def main():
 
     prune_old_cards()
     print(f"\nDone. {len(generated)} card(s) generated.")
+
+
+def send_telegram_photo(image_path, caption):
+    """Send a flare card image to the Telegram group."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not bot_token or not chat_id:
+        return
+    try:
+        with open(image_path, "rb") as photo:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendPhoto",
+                data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+                files={"photo": photo},
+                timeout=30,
+            )
+        result = resp.json()
+        if result.get("ok"):
+            print(f"  [telegram] Alert sent: {os.path.basename(image_path)}")
+        else:
+            print(f"  [telegram] Send failed: {result}")
+    except Exception as e:
+        print(f"  [telegram] Error: {e}")
 
 
 if __name__ == "__main__":
