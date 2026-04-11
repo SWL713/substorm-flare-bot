@@ -454,13 +454,73 @@ def _build_chart(peak_time, flare_class, chart_path, xray_times, xray_fluxes,
     plt.close(fig)
 
 
-def _composite_chart(template, chart_path):
+def _fetch_sdo_image(peak_time_str, location_str):
+    """Fetch SDO/AIA 131A full sun image from Helioviewer and draw region box."""
+    import math as _m
+    try:
+        peak_z = peak_time_str.replace('+00:00', 'Z').replace(' ', 'T')
+        if not peak_z.endswith('Z'):
+            peak_z += 'Z'
+        url = (f'https://api.helioviewer.org/v2/takeScreenshot/'
+               f'?date={peak_z}&imageScale=4.5&x0=0&y0=0&width=512&height=512'
+               f'&layers=[SDO,AIA,AIA,131,1,100]&display=true&watermark=false')
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        sdo_img = Image.open(__import__('io').BytesIO(resp.content)).convert("RGBA")
+
+        # Draw red bounding box at flare location
+        if location_str and len(location_str) >= 4:
+            try:
+                lat_v = int(location_str[1:3]) * (1 if location_str[0] == 'N' else -1)
+                lon_v = int(location_str[4:]) * (1 if location_str[3] == 'W' else -1)
+                R = 960 / 4.5  # solar radius in pixels
+                x = 256 + R * _m.sin(_m.radians(lon_v)) * _m.cos(_m.radians(lat_v))
+                y = 256 - R * _m.sin(_m.radians(lat_v))
+                box_size = 35
+                draw = ImageDraw.Draw(sdo_img)
+                draw.rectangle(
+                    [x - box_size/2, y - box_size/2, x + box_size/2, y + box_size/2],
+                    outline='#ff3333', width=2)
+            except Exception as e:
+                print(f"  [sdo] Could not draw region box: {e}")
+
+        return sdo_img
+    except Exception as e:
+        print(f"  [sdo] Failed to fetch SDO image: {e}")
+        return None
+
+
+def _composite_chart(template, chart_path, sdo_img=None):
     chart_img = Image.open(chart_path).convert("RGBA")
-    chart_img.thumbnail((870, 395))
-    template.alpha_composite(
-        chart_img,
-        (105 + (870 - chart_img.width) // 2, 865 + (395 - chart_img.height) // 2),
-    )
+
+    if sdo_img:
+        # Split layout: X-ray chart on left, SDO on right
+        panel_w, panel_h = 870, 395
+        half_w = panel_w // 2
+
+        # Resize chart to left half
+        chart_img.thumbnail((half_w - 5, panel_h))
+        # Resize SDO to right half (square, fit height)
+        sdo_resized = sdo_img.copy()
+        sdo_resized.thumbnail((half_w - 5, panel_h))
+
+        x_base, y_base = 105, 865
+        # Chart on left, centered vertically
+        template.alpha_composite(
+            chart_img,
+            (x_base + (half_w - chart_img.width) // 2,
+             y_base + (panel_h - chart_img.height) // 2))
+        # SDO on right, centered vertically
+        template.alpha_composite(
+            sdo_resized,
+            (x_base + half_w + (half_w - sdo_resized.width) // 2,
+             y_base + (panel_h - sdo_resized.height) // 2))
+    else:
+        # No SDO — chart fills full width (original behavior)
+        chart_img.thumbnail((870, 395))
+        template.alpha_composite(
+            chart_img,
+            (105 + (870 - chart_img.width) // 2, 865 + (395 - chart_img.height) // 2))
 
 
 # ── Card renderers ────────────────────────────────────────────────────────────
@@ -516,7 +576,11 @@ def render_inprogress_card(active, xray_times, xray_fluxes):
                                f"chart_live_{start_time.strftime('%Y%m%d_%H%M')}.png")
     _build_chart(peak_time, peak_class, chart_path, xray_times, xray_fluxes,
                   inprogress=True, event_start=start_time)
-    _composite_chart(template, chart_path)
+
+    # Try to fetch SDO image (location may not be available for in-progress)
+    loc_str = active.get("location", "")
+    sdo_img = _fetch_sdo_image(active["peak_time"], loc_str) if loc_str else None
+    _composite_chart(template, chart_path, sdo_img)
 
     x_footer = (template.width - draw.textbbox((0, 0), footer_text, font=font_footer)[2]) // 2
     draw.text((x_footer, template.height - 36), footer_text,
@@ -572,7 +636,11 @@ def render_card(flare, xray_times, xray_fluxes):
     chart_path = os.path.join(CHARTS_DIR, f"chart_{peak_dt.strftime('%Y%m%d_%H%M')}.png")
     _build_chart(peak_dt, flare_class, chart_path, xray_times, xray_fluxes,
                   inprogress=False, event_start=start_dt)
-    _composite_chart(template, chart_path)
+
+    # Fetch SDO image with region box
+    loc_str = flare.get("location", flare.get("source_location", ""))
+    sdo_img = _fetch_sdo_image(flare["max_time"], loc_str)
+    _composite_chart(template, chart_path, sdo_img)
 
     footer = f"Data: NOAA SWPC  -  Satellite: {satellite}"
     x_footer = (template.width - draw.textbbox((0, 0), footer, font=font_footer)[2]) // 2
