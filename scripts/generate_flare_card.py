@@ -560,8 +560,25 @@ def _composite_chart(template, chart_path, sdo_img=None):
             (x_base - chart_shift_left + (chart_w - chart_img.width) // 2,
              y_base + (panel_h - chart_img.height) // 2))
 
-        # SDO: exact square at panel height, flush right
+        # SDO: exact square at panel height, flush right, feathered edges
         sdo_resized = sdo_img.resize((sdo_size, sdo_size), Image.LANCZOS)
+        # Radial fade — circular vignette from center outward
+        import math as _m
+        mask = Image.new('L', (sdo_size, sdo_size), 255)
+        cx, cy = sdo_size / 2, sdo_size / 2
+        r_full = sdo_size * 0.38   # fully opaque inside this radius
+        r_edge = sdo_size * 0.50   # fully transparent at this radius
+        for y in range(sdo_size):
+            for x in range(sdo_size):
+                d = _m.sqrt((x - cx)**2 + (y - cy)**2)
+                if d <= r_full:
+                    a = 255
+                elif d >= r_edge:
+                    a = 0
+                else:
+                    a = int(255 * (1 - (d - r_full) / (r_edge - r_full)))
+                mask.putpixel((x, y), a)
+        sdo_resized.putalpha(mask)
         template.alpha_composite(
             sdo_resized,
             (x_base + chart_w + gap, y_base))
