@@ -175,6 +175,40 @@ def _fetch_json(url):
         return []
 
 
+def _enrich_from_donki(flares):
+    """Enrich flares with location + active region from NASA DONKI."""
+    try:
+        start = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%d')
+        end = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        url = f'https://kauai.ccmc.gsfc.nasa.gov/DONKI/WS/get/FLR?startDate={start}&endDate={end}'
+        donki = _fetch_json(url)
+        if not donki:
+            return
+        for flare in flares:
+            if flare.get('location') or not flare.get('max_time'):
+                continue
+            try:
+                fp = datetime.fromisoformat(flare['max_time'].replace('Z', '+00:00'))
+            except Exception:
+                continue
+            for df in donki:
+                if not isinstance(df, dict):
+                    continue
+                try:
+                    dp = datetime.fromisoformat(str(df.get('peakTime', '')).replace('Z', '+00:00'))
+                    if abs((dp - fp).total_seconds()) < 600:
+                        if df.get('sourceLocation'):
+                            flare['location'] = df['sourceLocation']
+                        if df.get('activeRegionNum'):
+                            flare['active_region'] = df['activeRegionNum']
+                        print(f"  [donki] Enriched {flare['max_class']} with loc={flare.get('location')} AR={flare.get('active_region')}")
+                        break
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"  [donki] Enrichment failed: {e}")
+
+
 def fetch_all_flares():
     seen, merged = set(), []
     for url in FLARE_URLS:
@@ -188,6 +222,7 @@ def fetch_all_flares():
     if not merged:
         raise RuntimeError("No valid flare data from any source.")
     merged.sort(key=lambda f: f["max_time"])
+    _enrich_from_donki(merged)
     return merged
 
 
