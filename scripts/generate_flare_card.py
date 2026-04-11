@@ -632,7 +632,9 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
     # STEP 1 — Completed cards from finalised NOAA events
     # ═══════════════════════════════════════════════════════════════════════
-    new_flares = [f for f in all_flares if flare_id(f) not in processed_ids]
+    new_flares = [f for f in all_flares
+                  if flare_id(f) not in processed_ids
+                  and (f.get("max_class", "")[0].upper() in ("M", "X"))]
     if new_flares:
         print(f"Found {len(new_flares)} new completed flare(s).")
 
