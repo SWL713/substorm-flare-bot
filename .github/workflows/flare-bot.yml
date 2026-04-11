@@ -1,8 +1,9 @@
 name: Substorm Flare Bot
 
 on:
-  schedule:
-    - cron: '0 */2 * * *'    # every 2 hours — catches flares shortly after NOAA closes them
+  # schedule disabled — manual runs only until VPS is set up
+  # schedule:
+  #   - cron: '0 */2 * * *'
   workflow_dispatch:
 
 permissions:
