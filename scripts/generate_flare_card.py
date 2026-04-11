@@ -57,12 +57,18 @@ def ensure_dirs():
 
 def load_font(size, bold=False):
     candidates = [
+        # Linux
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
             else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold
             else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold
             else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        # Windows
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/calibrib.ttf" if bold else "C:/Windows/Fonts/calibri.ttf",
+        # macOS
+        "/System/Library/Fonts/Helvetica.ttc",
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -395,7 +401,7 @@ def find_active_event_for_flare(flare, active_events):
 # ── Chart ─────────────────────────────────────────────────────────────────────
 
 def _build_chart(peak_time, flare_class, chart_path, xray_times, xray_fluxes,
-                  inprogress=False, event_start=None):
+                  inprogress=False, event_start=None, sdo_mode=False):
     now_utc = datetime.now().astimezone(peak_time.tzinfo)
 
     # ── Adaptive window ───────────────────────────────────────────────────────
@@ -433,7 +439,9 @@ def _build_chart(peak_time, flare_class, chart_path, xray_times, xray_fluxes,
     plot_times  = [t for t, _ in filtered]
     plot_fluxes = [f for _, f in filtered]
 
-    fig, ax = plt.subplots(figsize=(8.2, 4.4))
+    # When SDO is beside the chart, generate at squarer aspect ratio so text
+    # stays the same size after thumbnail. Without SDO, original wide ratio.
+    fig, ax = plt.subplots(figsize=(5.2, 4.4) if sdo_mode else (8.2, 4.4))
     fig.patch.set_alpha(0.0)
     ax.set_facecolor((0, 0, 0, 0))
 
@@ -442,18 +450,24 @@ def _build_chart(peak_time, flare_class, chart_path, xray_times, xray_fluxes,
     ax.plot(plot_times, plot_fluxes, linewidth=2.5, color=line_color, solid_capstyle="round")
     ax.set_yscale("log")
 
-    # Y-axis: floor at A-level, ceiling above the actual peak with headroom
-    y_max = max(1e-4, max(plot_fluxes) * 3) if plot_fluxes else 1e-4
-    ax.set_ylim(1e-8, y_max)
+    # Y-axis: tight autoscale — 10% padding above max, 10% below min (log scale)
+    if plot_fluxes:
+        data_max = max(plot_fluxes)
+        data_min = min(f for f in plot_fluxes if f > 0) if any(f > 0 for f in plot_fluxes) else 1e-8
+        y_max = data_max * 2.0   # ~10% in log space above peak
+        y_min = data_min / 2.0   # ~10% in log space below floor
+    else:
+        y_min, y_max = 1e-8, 1e-4
+    ax.set_ylim(y_min, y_max)
 
-    # Build tick labels — always show A/B/C/M/X, add X10 if peak reaches it
-    yticks  = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4]
-    ylabels = ["A",  "B",  "C",  "M",  "X"]
-    tick_colors = ["#888888", "#9cc9ff", "#ffe57a", "#ffb347", "#ff7043"]
-    if y_max > 1e-3:
-        yticks.append(1e-3)
-        ylabels.append("X10")
-        tick_colors.append("#ff3300")
+    # Build tick labels — only show levels within visible range
+    all_ticks   = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3]
+    all_labels  = ["A",  "B",  "C",  "M",  "X",  "X10"]
+    all_colors  = ["#888888", "#9cc9ff", "#ffe57a", "#ffb347", "#ff7043", "#ff3300"]
+    yticks, ylabels, tick_colors = [], [], []
+    for val, lab, col in zip(all_ticks, all_labels, all_colors):
+        if y_min <= val <= y_max:
+            yticks.append(val); ylabels.append(lab); tick_colors.append(col)
 
     for value, color in zip(yticks, tick_colors):
         ax.axhline(value, color=color, linewidth=0.9, alpha=0.45)
@@ -511,11 +525,11 @@ def _fetch_sdo_image(peak_time_str, location_str):
                 R = 960 / 4.5  # solar radius in pixels
                 x = 256 + R * _m.sin(_m.radians(lon_v)) * _m.cos(_m.radians(lat_v))
                 y = 256 - R * _m.sin(_m.radians(lat_v))
-                box_size = 35
+                box_size = 70
                 draw = ImageDraw.Draw(sdo_img)
                 draw.rectangle(
                     [x - box_size/2, y - box_size/2, x + box_size/2, y + box_size/2],
-                    outline='#ff3333', width=2)
+                    outline='#ff3333', width=3)
             except Exception as e:
                 print(f"  [sdo] Could not draw region box: {e}")
 
@@ -528,34 +542,36 @@ def _fetch_sdo_image(peak_time_str, location_str):
 def _composite_chart(template, chart_path, sdo_img=None):
     chart_img = Image.open(chart_path).convert("RGBA")
 
+    x_base, y_base = 105, 865
+    panel_w, panel_h = 870, 395
+
     if sdo_img:
-        # Split layout: X-ray chart on left, SDO on right
-        panel_w, panel_h = 870, 395
-        half_w = panel_w // 2
+        # SDO is square, sized to panel height, with gap
+        gap = 15
+        sdo_size = panel_h
+        chart_w = panel_w - sdo_size - gap
+        chart_shift_left = 35
+        chart_extra_h = 55  # extend chart taller
 
-        # Resize chart to left half
-        chart_img.thumbnail((half_w - 5, panel_h))
-        # Resize SDO to right half (square, fit height)
-        sdo_resized = sdo_img.copy()
-        sdo_resized.thumbnail((half_w - 5, panel_h))
-
-        x_base, y_base = 105, 865
-        # Chart on left, centered vertically
+        # Chart: scale to fit left portion, taller than panel
+        chart_img.thumbnail((chart_w, panel_h + chart_extra_h))
         template.alpha_composite(
             chart_img,
-            (x_base + (half_w - chart_img.width) // 2,
+            (x_base - chart_shift_left + (chart_w - chart_img.width) // 2,
              y_base + (panel_h - chart_img.height) // 2))
-        # SDO on right, centered vertically
+
+        # SDO: exact square at panel height, flush right
+        sdo_resized = sdo_img.resize((sdo_size, sdo_size), Image.LANCZOS)
         template.alpha_composite(
             sdo_resized,
-            (x_base + half_w + (half_w - sdo_resized.width) // 2,
-             y_base + (panel_h - sdo_resized.height) // 2))
+            (x_base + chart_w + gap, y_base))
     else:
         # No SDO — chart fills full width (original behavior)
-        chart_img.thumbnail((870, 395))
+        chart_img.thumbnail((panel_w, panel_h))
         template.alpha_composite(
             chart_img,
-            (105 + (870 - chart_img.width) // 2, 865 + (395 - chart_img.height) // 2))
+            (x_base + (panel_w - chart_img.width) // 2,
+             y_base + (panel_h - chart_img.height) // 2))
 
 
 # ── Card renderers ────────────────────────────────────────────────────────────
@@ -607,14 +623,13 @@ def render_inprogress_card(active, xray_times, xray_fluxes):
     x_chart = (template.width - draw.textbbox((0, 0), chart_title, font=font_chart)[2]) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(255, 190, 80, 255))
 
+    loc_str = active.get("location", "")
+    sdo_img = _fetch_sdo_image(active["peak_time"], loc_str) if loc_str else None
+
     chart_path = os.path.join(CHARTS_DIR,
                                f"chart_live_{start_time.strftime('%Y%m%d_%H%M')}.png")
     _build_chart(peak_time, peak_class, chart_path, xray_times, xray_fluxes,
-                  inprogress=True, event_start=start_time)
-
-    # Try to fetch SDO image (location may not be available for in-progress)
-    loc_str = active.get("location", "")
-    sdo_img = _fetch_sdo_image(active["peak_time"], loc_str) if loc_str else None
+                  inprogress=True, event_start=start_time, sdo_mode=bool(sdo_img))
     _composite_chart(template, chart_path, sdo_img)
 
     x_footer = (template.width - draw.textbbox((0, 0), footer_text, font=font_footer)[2]) // 2
@@ -668,13 +683,12 @@ def render_card(flare, xray_times, xray_fluxes):
     x_chart = (template.width - draw.textbbox((0, 0), chart_title, font=font_chart)[2]) // 2
     draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
+    loc_str = flare.get("location", flare.get("source_location", ""))
+    sdo_img = _fetch_sdo_image(flare["max_time"], loc_str) if loc_str else None
+
     chart_path = os.path.join(CHARTS_DIR, f"chart_{peak_dt.strftime('%Y%m%d_%H%M')}.png")
     _build_chart(peak_dt, flare_class, chart_path, xray_times, xray_fluxes,
-                  inprogress=False, event_start=start_dt)
-
-    # Fetch SDO image with region box
-    loc_str = flare.get("location", flare.get("source_location", ""))
-    sdo_img = _fetch_sdo_image(flare["max_time"], loc_str)
+                  inprogress=False, event_start=start_dt, sdo_mode=bool(sdo_img))
     _composite_chart(template, chart_path, sdo_img)
 
     footer = f"Data: NOAA SWPC  -  Satellite: {satellite}"
