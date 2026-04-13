@@ -1,8 +1,9 @@
 name: Substorm Flare Bot
 
 on:
-  schedule:
-    - cron: '0 12 * * *'    # once daily at noon UTC — keeps repo active
+  # Schedule disabled — flare bot now runs every 2 min on Oracle VPS
+  # schedule:
+  #   - cron: '0 12 * * *'
   workflow_dispatch:
 
 permissions:
