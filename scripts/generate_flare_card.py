@@ -1,10 +1,12 @@
 """
 Substorm Flare Bot — generate_flare_card.py
 
-COMPLETED cards only — fires once NOAA finalises the event in their 7-day
-flares feed (i.e., the flare has peaked and been confirmed). The earlier
-"IN PROGRESS" path that fired on live X-ray detection was disabled in
-favor of confirmed-only posting (avoids false positives + hype).
+Two card modes:
+  IN PROGRESS — fires immediately when live X-ray flux crosses M1.0 and stays
+                there for at least 3 minutes. Only triggers for M and X class.
+  COMPLETED   — fires once NOAA finalises the event in their 7-day flares feed.
+
+In-progress cards are pruned once the matching completed card is generated.
 """
 
 import json
@@ -786,14 +788,54 @@ def main():
                 f"Peak: {peak_t} UTC\n"
                 f"Confirmed by NOAA")
 
+            # Remove the matching in-progress card
+            matched = find_active_event_for_flare(flare, active_events)
+            if matched:
+                if matched.get("card_filename"):
+                    ip_path = os.path.join(CARDS_DIR, matched["card_filename"])
+                    if os.path.exists(ip_path):
+                        os.remove(ip_path)
+                        print(f"  [swap] Removed in-progress card: {matched['card_filename']}")
+                active_events = [ae for ae in active_events if ae is not matched]
+
         except Exception as exc:
             print(f"  [fail] {fid}: {exc}")
 
-    # In-progress detection (was Step 2) is disabled — we only post NOAA-
-    # confirmed events. To re-enable, restore the find_mx_events_in_series
-    # loop + render_inprogress_card path from git history.
+    # ═══════════════════════════════════════════════════════════════════════
+    # STEP 2 — In-progress/retrospective cards from X-ray history (M/X only)
+    # Scans the full 6-hour series — catches events whether currently active
+    # or already peaked and awaiting NOAA confirmation.
+    # ═══════════════════════════════════════════════════════════════════════
+    mx_events = find_mx_events_in_series(xray_times, xray_fluxes)
+
+    if not mx_events:
+        print("[scan] No M/X events found in X-ray history.")
+
+    for active_flare in mx_events:
+        event_start_dt = datetime.fromisoformat(active_flare["event_start"])
+        already        = active_event_already_carded(event_start_dt, active_events)
+
+        if not already:
+            try:
+                output = render_inprogress_card(active_flare, xray_times, xray_fluxes)
+                active_flare["card_filename"] = os.path.basename(output)
+                active_events.append(active_flare)
+                generated.append(output)
+
+                # Alert Telegram
+                fc = active_flare.get("current_class", "M?")
+                send_telegram_photo(output,
+                    f"<b>Solar Flare IN PROGRESS — {fc}</b>\n"
+                    f"Detected in live X-ray data")
+                status = "active" if active_flare.get("still_active") else "peaked — awaiting NOAA"
+                print(f"  [card] In-progress card ({status}): {output}")
+            except Exception as exc:
+                print(f"  [fail] In-progress render: {exc}")
+        else:
+            print(f"[scan] Card already exists for event at {active_flare['event_start']} — skipping.")
 
     save_processed_ids(processed_ids)
+    save_active_events(active_events)
 
     if not generated:
         print("Nothing new to commit.")
