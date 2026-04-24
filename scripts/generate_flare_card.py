@@ -603,18 +603,9 @@ def render_inprogress_card(active, xray_times, xray_fluxes):
     current_class = active["current_class"]
     fill_color    = class_color(peak_class)
 
-    still_active = active.get("still_active", True)
-    banner_text  = ("  IN PROGRESS  -  UPDATING LIVE"
-                    if still_active else
-                    "  PEAKED  -  AWAITING NOAA CONFIRMATION")
-    footer_text  = ("Data: NOAA SWPC  -  Status: IN PROGRESS  -  card will update"
-                    if still_active else
-                    "Data: NOAA SWPC  -  Status: PEAKED  -  final card coming soon")
-
-    draw_status_banner(template,
-                       text=banner_text,
-                       bg_rgba=(160, 80, 0, 210),
-                       text_rgba=(255, 210, 120, 255))
+    # Banner overlay removed — card renders the same regardless of NOAA
+    # confirmation status. Footer stays neutral.
+    footer_text = "Data: NOAA SWPC  ·  GOES primary X-ray series"
 
     font_class  = load_font(120, True)
     font_info   = load_font(28)
@@ -775,33 +766,47 @@ def main():
     #     rising_alerted: bool  — text heads-up sent
     #     card_filename: str|None — peak card rendered + posted
     # ═══════════════════════════════════════════════════════════════════════
-    def find_tracked(event_start_dt, events):
+    # Dedup by peak_time rather than event_start — the detector's event_start
+    # drifts a few minutes between runs as new X-ray data arrives, and a
+    # single "real" flare can register as several overlapping sub-peaks.
+    # 90-min window catches all sub-peaks of one noisy burst while still
+    # letting genuinely separate flares (hours apart) each get one card.
+    DEDUP_WINDOW_SEC = 90 * 60
+
+    def find_tracked(peak_dt, events):
         for ae in events:
-            ae_dt = datetime.fromisoformat(ae["event_start"])
-            if ae_dt.tzinfo is None:
-                ae_dt = ae_dt.replace(tzinfo=timezone.utc)
-            if abs((ae_dt - event_start_dt).total_seconds()) < 300:  # 5-min match window
+            if not ae.get("peak_time"):
+                continue
+            ae_peak = datetime.fromisoformat(ae["peak_time"])
+            if ae_peak.tzinfo is None:
+                ae_peak = ae_peak.replace(tzinfo=timezone.utc)
+            if abs((ae_peak - peak_dt).total_seconds()) < DEDUP_WINDOW_SEC:
                 return ae
         return None
 
     mx_events = find_mx_events_in_series(xray_times, xray_fluxes)
     for active_flare in mx_events:
-        event_start_dt = datetime.fromisoformat(active_flare["event_start"])
-        if event_start_dt.tzinfo is None:
-            event_start_dt = event_start_dt.replace(tzinfo=timezone.utc)
-        tracked = find_tracked(event_start_dt, active_events)
+        peak_dt = datetime.fromisoformat(active_flare["peak_time"])
+        if peak_dt.tzinfo is None:
+            peak_dt = peak_dt.replace(tzinfo=timezone.utc)
+        tracked = find_tracked(peak_dt, active_events)
         still_rising = active_flare.get("still_active", False)
 
+        # Check the card_filename FIRST regardless of status — if we've
+        # already carded this flare, we never send anything else about it.
+        if tracked and tracked.get("card_filename"):
+            continue
+
         if still_rising:
-            # Heads-up text — one per event, no card.
+            # Heads-up text — one per flare window, no card.
             if tracked and tracked.get("rising_alerted"):
                 continue
             fc = active_flare.get("current_class") or active_flare.get("peak_class") or "M?"
             send_telegram_message(
                 f"<b>🔺 Solar Flare IN PROGRESS — {fc}</b>\n"
-                f"Detected rising in live X-ray. Peak card will follow when flux declines."
+                f"Rising in live X-ray data."
             )
-            print(f"  [alert] Rising heads-up sent ({fc}) for event {active_flare['event_start']}")
+            print(f"  [alert] Rising heads-up sent ({fc}) peak~{active_flare['peak_time']}")
             if tracked:
                 tracked["rising_alerted"] = True
             else:
@@ -810,9 +815,7 @@ def main():
                 active_events.append(active_flare)
             continue
 
-        # Peaked — post card, once.
-        if tracked and tracked.get("card_filename"):
-            continue
+        # Peaked — post standard card, once.
         try:
             output = render_inprogress_card(active_flare, xray_times, xray_fluxes)
             generated.append(output)
@@ -821,16 +824,15 @@ def main():
             send_telegram_photo(output,
                 f"<b>Solar Flare — {fc}</b>\n"
                 f"Peak: {peak_t} UTC")
-            print(f"  [card] Peak card posted: {output}")
+            print(f"  [card] Card posted: {output}")
             if tracked:
                 tracked["card_filename"] = os.path.basename(output)
-                # Inherit fresh peak stats from the current scan
                 tracked["peak_time"]   = active_flare.get("peak_time", tracked.get("peak_time"))
                 tracked["peak_class"]  = active_flare.get("peak_class", tracked.get("peak_class"))
                 tracked["peak_flux"]   = active_flare.get("peak_flux", tracked.get("peak_flux"))
             else:
                 active_flare["card_filename"] = os.path.basename(output)
-                active_flare["rising_alerted"] = True  # no rising alert was sent, but mark so it won't re-send later
+                active_flare["rising_alerted"] = True  # suppress future rising alerts for this window
                 active_events.append(active_flare)
         except Exception as exc:
             print(f"  [fail] Peak render: {exc}")
