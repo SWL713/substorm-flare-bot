@@ -1,10 +1,11 @@
 """
 Substorm Flare Bot — generate_flare_card.py
 
-COMPLETED cards only — fires once NOAA finalises the event in their 7-day
-flares feed (i.e., the flare has peaked and been confirmed). The earlier
-"IN PROGRESS" path that fired on live X-ray detection was disabled in
-favor of confirmed-only posting (avoids false positives + hype).
+Per flare, at most TWO messages:
+  1. Text-only "IN PROGRESS" heads-up when an M/X burst is first detected
+     rising in live X-ray data. No card — just a line in chat.
+  2. Full CARD posted once when that burst peaks (flux starts declining).
+NOAA-confirmed posts are skipped entirely — peak card already covers it.
 """
 
 import json
@@ -761,39 +762,81 @@ def main():
 
     generated = []
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # STEP 1 — Completed cards from finalised NOAA events
-    # ═══════════════════════════════════════════════════════════════════════
-    new_flares = [f for f in all_flares
-                  if flare_id(f) not in processed_ids
-                  and (f.get("max_class", "")[0].upper() in ("M", "X"))]
-    if new_flares:
-        print(f"Found {len(new_flares)} new completed flare(s).")
+    # Mark every NOAA-feed flare as processed so Step 1 never re-posts them.
+    # Live peak detection in Step 2 below is our only source of cards.
+    for f in all_flares:
+        processed_ids.add(flare_id(f))
 
-    for flare in new_flares:
-        fid = flare_id(flare)
+    # ═══════════════════════════════════════════════════════════════════════
+    # STEP 2 — Live detection. For each M/X burst in the live X-ray series:
+    #   • first time seen while rising  → text-only "IN PROGRESS" message
+    #   • once it peaks (flux declines) → full card, once
+    # Tracked per-event in active_events via new fields:
+    #     rising_alerted: bool  — text heads-up sent
+    #     card_filename: str|None — peak card rendered + posted
+    # ═══════════════════════════════════════════════════════════════════════
+    def find_tracked(event_start_dt, events):
+        for ae in events:
+            ae_dt = datetime.fromisoformat(ae["event_start"])
+            if ae_dt.tzinfo is None:
+                ae_dt = ae_dt.replace(tzinfo=timezone.utc)
+            if abs((ae_dt - event_start_dt).total_seconds()) < 300:  # 5-min match window
+                return ae
+        return None
+
+    mx_events = find_mx_events_in_series(xray_times, xray_fluxes)
+    for active_flare in mx_events:
+        event_start_dt = datetime.fromisoformat(active_flare["event_start"])
+        if event_start_dt.tzinfo is None:
+            event_start_dt = event_start_dt.replace(tzinfo=timezone.utc)
+        tracked = find_tracked(event_start_dt, active_events)
+        still_rising = active_flare.get("still_active", False)
+
+        if still_rising:
+            # Heads-up text — one per event, no card.
+            if tracked and tracked.get("rising_alerted"):
+                continue
+            fc = active_flare.get("current_class") or active_flare.get("peak_class") or "M?"
+            send_telegram_message(
+                f"<b>🔺 Solar Flare IN PROGRESS — {fc}</b>\n"
+                f"Detected rising in live X-ray. Peak card will follow when flux declines."
+            )
+            print(f"  [alert] Rising heads-up sent ({fc}) for event {active_flare['event_start']}")
+            if tracked:
+                tracked["rising_alerted"] = True
+            else:
+                active_flare["rising_alerted"] = True
+                active_flare["card_filename"] = None
+                active_events.append(active_flare)
+            continue
+
+        # Peaked — post card, once.
+        if tracked and tracked.get("card_filename"):
+            continue
         try:
-            output = render_card(flare, xray_times, xray_fluxes)
-            processed_ids.add(fid)
+            output = render_inprogress_card(active_flare, xray_times, xray_fluxes)
             generated.append(output)
-            print(f"  [done] Completed card: {output}")
-
-            # Alert Telegram
-            fc = flare.get("max_class", "?")
-            peak_t = flare.get("max_time", "")[:16].replace("T", " ")
+            fc = active_flare.get("peak_class") or active_flare.get("current_class", "M?")
+            peak_t = active_flare.get("peak_time", "")[:16].replace("T", " ")
             send_telegram_photo(output,
                 f"<b>Solar Flare — {fc}</b>\n"
-                f"Peak: {peak_t} UTC\n"
-                f"Confirmed by NOAA")
-
+                f"Peak: {peak_t} UTC")
+            print(f"  [card] Peak card posted: {output}")
+            if tracked:
+                tracked["card_filename"] = os.path.basename(output)
+                # Inherit fresh peak stats from the current scan
+                tracked["peak_time"]   = active_flare.get("peak_time", tracked.get("peak_time"))
+                tracked["peak_class"]  = active_flare.get("peak_class", tracked.get("peak_class"))
+                tracked["peak_flux"]   = active_flare.get("peak_flux", tracked.get("peak_flux"))
+            else:
+                active_flare["card_filename"] = os.path.basename(output)
+                active_flare["rising_alerted"] = True  # no rising alert was sent, but mark so it won't re-send later
+                active_events.append(active_flare)
         except Exception as exc:
-            print(f"  [fail] {fid}: {exc}")
-
-    # In-progress detection (was Step 2) is disabled — we only post NOAA-
-    # confirmed events. To re-enable, restore the find_mx_events_in_series
-    # loop + render_inprogress_card path from git history.
+            print(f"  [fail] Peak render: {exc}")
 
     save_processed_ids(processed_ids)
+    save_active_events(active_events)
 
     if not generated:
         print("Nothing new to commit.")
@@ -801,6 +844,33 @@ def main():
 
     prune_old_cards()
     print(f"\nDone. {len(generated)} card(s) generated.")
+
+
+def send_telegram_message(text):
+    """Send a plain text message to the Telegram group + channel (no image)."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_ids = [
+        os.environ.get("TELEGRAM_CHAT_ID"),
+        os.environ.get("TELEGRAM_CHANNEL_ID"),
+    ]
+    if not bot_token:
+        return
+    for chat_id in chat_ids:
+        if not chat_id:
+            continue
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=15,
+            )
+            result = resp.json()
+            if result.get("ok"):
+                print(f"  [telegram] Text sent to {chat_id}")
+            else:
+                print(f"  [telegram] Text send failed to {chat_id}: {result}")
+        except Exception as e:
+            print(f"  [telegram] Text error to {chat_id}: {e}")
 
 
 def send_telegram_photo(image_path, caption):
