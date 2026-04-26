@@ -214,7 +214,17 @@ def _enrich_from_donki(flares):
                         if df.get('sourceLocation'):
                             flare['location'] = df['sourceLocation']
                         if df.get('activeRegionNum'):
-                            flare['active_region'] = df['activeRegionNum']
+                            # NOAA SWPC public AR format is 4-digit. DONKI
+                            # sometimes returns 5-digit with a leading '1'
+                            # (cycle namespace) — strip it so 14220 → 4220.
+                            try:
+                                ar_n = int(df['activeRegionNum'])
+                                ar_s = str(ar_n)
+                                if len(ar_s) == 5 and ar_s[0] == '1':
+                                    ar_n = int(ar_s[1:])
+                                flare['active_region'] = ar_n
+                            except (ValueError, TypeError):
+                                flare['active_region'] = df['activeRegionNum']
                         print(f"  [donki] Enriched {flare['max_class']} with loc={flare.get('location')} AR={flare.get('active_region')}")
                         break
                 except Exception:
