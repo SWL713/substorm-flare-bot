@@ -704,9 +704,22 @@ def render_card(flare, xray_times, xray_fluxes):
     draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
     draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
 
+    # Source line (active region + heliographic location) — only drawn when
+    # DONKI gave us at least one. Limb flares often have neither, in which
+    # case we skip the line entirely rather than print an empty placeholder.
+    ar_num   = flare.get("active_region")
+    loc_text = flare.get("location") or flare.get("source_location")
+    src_bits = []
+    if ar_num:   src_bits.append(f"Region : AR {ar_num}")
+    if loc_text: src_bits.append(f"Location : {loc_text}")
+    if src_bits:
+        line3 = "      ".join(src_bits)
+        x3 = (template.width - draw.textbbox((0, 0), line3, font=font_info)[2]) // 2
+        draw.text((x3, 775), line3, font=font_info, fill=(200, 220, 240, 255))
+
     chart_title = f"{satellite} X-Ray Flux"
     x_chart = (template.width - draw.textbbox((0, 0), chart_title, font=font_chart)[2]) // 2
-    draw.text((x_chart, 805), chart_title, font=font_chart, fill=(240, 220, 170, 255))
+    draw.text((x_chart, 815), chart_title, font=font_chart, fill=(240, 220, 170, 255))
 
     loc_str = flare.get("location", flare.get("source_location", ""))
     sdo_img = _fetch_sdo_image(flare["max_time"], loc_str) if loc_str else None
@@ -787,9 +800,18 @@ def main():
 
             fc = flare.get("max_class", "?")
             peak_t = flare.get("max_time", "")[:16].replace("T", " ")
-            send_telegram_photo(output,
-                f"<b>Solar Flare — {fc}</b>\n"
-                f"Peak: {peak_t} UTC")
+            ar  = flare.get("active_region")
+            loc = flare.get("location") or flare.get("source_location")
+            # Append source line only when DONKI gave us at least one of AR / loc.
+            # Limb flares often have neither — keep the caption clean in that case.
+            source_bits = []
+            if ar:  source_bits.append(f"AR {ar}")
+            if loc: source_bits.append(loc)
+            source_line = (" · ".join(source_bits))
+            caption = f"<b>Solar Flare — {fc}</b>\nPeak: {peak_t} UTC"
+            if source_line:
+                caption += f"\nSource: {source_line}"
+            send_telegram_photo(output, caption)
         except Exception as exc:
             print(f"  [fail] {fid}: {exc}")
 
