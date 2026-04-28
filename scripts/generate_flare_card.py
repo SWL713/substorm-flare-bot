@@ -189,6 +189,60 @@ def _fetch_json(url):
         return []
 
 
+def _fetch_current_donki_source(min_class='M'):
+    """Best-effort: which AR is currently flaring? For the rising-alert text,
+    we don't yet have a NOAA-finalised flare object — try DONKI for the most
+    recent flare in the last 2 hours at min_class or higher, return its AR
+    + sourceLocation. Returns {} on any failure so the alert still goes out
+    when DONKI is slow / unreachable / has no match yet (DONKI lags live data
+    by minutes-to-hours, so misses are expected and tolerated)."""
+    try:
+        end_d = datetime.now(timezone.utc)
+        start_d = end_d - timedelta(days=1)
+        url = (f'https://kauai.ccmc.gsfc.nasa.gov/DONKI/WS/get/FLR'
+               f'?startDate={start_d.strftime("%Y-%m-%d")}'
+               f'&endDate={end_d.strftime("%Y-%m-%d")}')
+        donki = _fetch_json(url)
+        if not donki:
+            return {}
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+        threshold_letter = (min_class or 'M')[0].upper()
+        candidates = []
+        for df in donki:
+            if not isinstance(df, dict):
+                continue
+            class_str = (df.get('classType') or '').strip()
+            if not class_str or class_str[0].upper() < threshold_letter:
+                continue
+            try:
+                pt = datetime.fromisoformat(str(df.get('peakTime', '')).replace('Z', '+00:00'))
+            except Exception:
+                continue
+            if pt < cutoff:
+                continue
+            candidates.append((pt, df))
+        if not candidates:
+            return {}
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        df = candidates[0][1]
+        ar = df.get('activeRegionNum')
+        if ar:
+            try:
+                ar_n = int(ar)
+                if len(str(ar_n)) == 5 and str(ar_n)[0] == '1':
+                    ar_n = int(str(ar_n)[1:])
+                ar = ar_n
+            except (ValueError, TypeError):
+                pass
+        return {
+            'active_region': ar,
+            'location': df.get('sourceLocation'),
+        }
+    except Exception as e:
+        print(f"  [rising-donki] Lookup failed: {e}")
+        return {}
+
+
 def _enrich_from_donki(flares):
     """Enrich flares with location + active region from NASA DONKI."""
     try:
@@ -860,14 +914,27 @@ def main():
         if latest >= 1e-5 and latest == max(recent):
             fc = flux_to_class(latest)
             now_str = now_utc.strftime("%H:%M UTC")
+
+            # Best-effort source lookup. DONKI lags live data by minutes-to-hours
+            # so this often returns nothing during the rising phase — that's fine,
+            # we just omit the source line. The rising alert always goes out.
+            src = _fetch_current_donki_source(min_class='M')
+            source_line = ""
+            if src.get('active_region'):
+                bits = [f"AR {src['active_region']}"]
+                if src.get('location'):
+                    bits.append(src['location'])
+                source_line = f"Source: {' · '.join(bits)}\n"
+
             send_telegram_message(
                 f"<b>🔺 Solar Flare in progress — {fc}</b>\n"
                 f"Live X-ray rising past M1 at {now_str}.\n"
+                f"{source_line}"
                 f"Card will follow when NOAA finalises the event."
             )
             state["last_alert_at"] = now_utc.isoformat()
             save_rising_alert_state(state)
-            print(f"  [rising] Alert sent: {fc} at {now_str}")
+            print(f"  [rising] Alert sent: {fc} at {now_str} src={src or '-'}")
 
     if not generated:
         print("No new cards this run.")
