@@ -1,0 +1,16 @@
+# Runtime state — VPS-local, must not be tracked. Committing state caused
+# the Monthly Cleanup workflow to wipe live entries, and stalled auto_pull
+# on the VPS because the file is constantly modified between runs.
+data/processed_flares.json
+data/active_events.json
+data/rising_alert_state.json
+data/last_flare_id.txt
+
+# Generated cards + charts — regenerated every run, not source of truth
+cards/*.png
+charts/*.png
+
+# Python
+venv/
+__pycache__/
+*.pyc

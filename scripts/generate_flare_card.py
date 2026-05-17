@@ -18,7 +18,6 @@ real flare. Cards now come exclusively from NOAA.
 import json
 import os
 import glob
-import re
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -128,13 +127,40 @@ def draw_status_banner(template, text, bg_rgba, text_rgba, y=462, height=44):
 # ── State ─────────────────────────────────────────────────────────────────────
 
 def flare_id(flare):
-    return (f"{flare.get('begin_time', '')}"
-            f"_{flare.get('max_time', '')}"
-            f"_{flare.get('max_class', '')}")
+    # Bucket by max_time to nearest 10 min + class letter only. Necessary because:
+    #   1) Primary vs secondary GOES routinely disagree on begin_time by 1 min
+    #      for the same flare (different sensors). Including begin_time in the
+    #      key produced 2 cards per flare.
+    #   2) NOAA revises begin_time / max_time / class decimal as it finalises
+    #      an in-progress event. Each revision spawned a new key → spam.
+    # Two distinct M/X flares peaking within 10 min of each other are
+    # extraordinarily rare; accept that collision to stop the duplicate alerts.
+    mt_str = flare.get("max_time", "")
+    cls = (flare.get("max_class") or "?")[0].upper()
+    try:
+        mt = parse_time(mt_str)
+        bucket = mt.replace(minute=(mt.minute // 10) * 10, second=0, microsecond=0)
+        return f"{bucket.isoformat()}_{cls}"
+    except Exception:
+        return f"{mt_str}_{cls}"
 
 
-def _normalize_id(fid):
-    return re.sub(r"_\d+$", "", fid)
+def _migrate_legacy_id(stored_id):
+    # Re-key entries written under the old `begin_time_max_time_max_class`
+    # scheme into the new `bucket_letter` scheme. Returns the input unchanged
+    # if already in new format. Returns None on unparseable input (caller skips).
+    parts = stored_id.split("_")
+    if len(parts) == 2:
+        return stored_id
+    if len(parts) < 3:
+        return None
+    try:
+        mt = parse_time(parts[-2])
+    except Exception:
+        return None
+    bucket = mt.replace(minute=(mt.minute // 10) * 10, second=0, microsecond=0)
+    letter = (parts[-1] or "?")[0].upper()
+    return f"{bucket.isoformat()}_{letter}"
 
 
 def load_processed_ids():
@@ -143,7 +169,9 @@ def load_processed_ids():
         with open(LEGACY_STATE_FILE, "r", encoding="utf-8") as fh:
             legacy_id = fh.read().strip()
         if legacy_id:
-            ids.add(_normalize_id(legacy_id))
+            migrated = _migrate_legacy_id(legacy_id)
+            if migrated:
+                ids.add(migrated)
         save_processed_ids(ids)
         print(f"[migrate] Promoted legacy ID: {legacy_id}")
         return ids
@@ -151,7 +179,10 @@ def load_processed_ids():
         return ids
     with open(STATE_FILE, "r", encoding="utf-8") as fh:
         try:
-            ids = set(_normalize_id(x) for x in json.load(fh))
+            for x in json.load(fh):
+                migrated = _migrate_legacy_id(x)
+                if migrated:
+                    ids.add(migrated)
         except (json.JSONDecodeError, TypeError):
             pass
     return ids
