@@ -49,6 +49,13 @@ ACTIVE_EVENTS_FILE = os.path.join(DATA_DIR, "active_events.json")
 RISING_ALERT_FILE  = os.path.join(DATA_DIR, "rising_alert_state.json")
 RISING_ALERT_COOLDOWN_MIN = 90  # minutes between rising-flare text alerts
 
+# Only ever card flares whose NOAA max_time is within this many hours of now.
+# NOAA finalises events minutes-to-hours after peak, so a few hours covers the
+# legit lag. This is defense-in-depth: if the dedup state is ever lost/corrupt,
+# an OLD flare (yesterday's) can never be resurrected and re-posted — the blast
+# radius is bounded to genuinely-recent events even in the worst case.
+CARD_MAX_AGE_HRS = 6
+
 # ── In-progress settings (M and X only) ───────────────────────────────────────
 INPROGRESS_MIN_FLUX      = 1e-5   # M1.0 — minimum to trigger a live card
 INPROGRESS_SUSTAIN_MINS  = 3      # must stay above threshold this long
@@ -163,6 +170,27 @@ def _migrate_legacy_id(stored_id):
     return f"{bucket.isoformat()}_{letter}"
 
 
+def _strip_conflict_markers(raw):
+    """Salvage a JSON file that has git merge/stash conflict markers in it
+    (we've seen `<<<<<<< / ======= / >>>>>>>` land in this state file when the
+    old auto_pull stash-dance conflicted). Return the side of each conflict
+    with more content — the real list, not the empty `[]` from the other
+    branch. No-op if there are no markers."""
+    if "<<<<<<<" not in raw:
+        return raw
+    ours, theirs, cur = [], [], "both"
+    for line in raw.splitlines():
+        if line.startswith("<<<<<<<"):
+            cur = "ours"; continue
+        if line.startswith("======="):
+            cur = "theirs"; continue
+        if line.startswith(">>>>>>>"):
+            cur = "both"; continue
+        if cur in ("ours", "both"):   ours.append(line)
+        if cur in ("theirs", "both"): theirs.append(line)
+    return "\n".join(ours if len("".join(ours)) >= len("".join(theirs)) else theirs)
+
+
 def load_processed_ids():
     ids = set()
     if not os.path.exists(STATE_FILE) and os.path.exists(LEGACY_STATE_FILE):
@@ -178,13 +206,31 @@ def load_processed_ids():
     if not os.path.exists(STATE_FILE):
         return ids
     with open(STATE_FILE, "r", encoding="utf-8") as fh:
+        raw = fh.read()
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        # Corrupt state — back it up so the dedup history isn't silently lost,
+        # then try to recover (most commonly git conflict markers). If it's
+        # still unreadable we start empty; the CARD_MAX_AGE_HRS recency window
+        # keeps that from re-blasting anything older than a few hours.
         try:
-            for x in json.load(fh):
-                migrated = _migrate_legacy_id(x)
-                if migrated:
-                    ids.add(migrated)
-        except (json.JSONDecodeError, TypeError):
+            with open(STATE_FILE + ".corrupt", "w", encoding="utf-8") as bf:
+                bf.write(raw)
+        except Exception:
             pass
+        try:
+            data = json.loads(_strip_conflict_markers(raw))
+            print("[state] recovered processed_flares.json from conflict markers")
+        except Exception:
+            print("[state] processed_flares.json unreadable — starting empty "
+                  "(recency window limits re-posts)")
+            data = []
+    if isinstance(data, list):
+        for x in data:
+            migrated = _migrate_legacy_id(x)
+            if migrated:
+                ids.add(migrated)
     return ids
 
 
@@ -879,9 +925,18 @@ def main():
     # processed_ids tracks which flare_ids have already been carded so each
     # NOAA flare is posted exactly once, ever.
     # ═══════════════════════════════════════════════════════════════════════
+    age_cutoff = now_utc - timedelta(hours=CARD_MAX_AGE_HRS)
+
+    def _fresh(f):
+        try:
+            return parse_time(f.get("max_time", "")) >= age_cutoff
+        except Exception:
+            return False
+
     new_flares = [f for f in all_flares
                   if flare_id(f) not in processed_ids
-                  and (f.get("max_class", "")[0].upper() in ("M", "X"))]
+                  and (f.get("max_class", "") or " ")[0].upper() in ("M", "X")
+                  and _fresh(f)]
     if new_flares:
         print(f"Found {len(new_flares)} new NOAA-confirmed flare(s).")
 
@@ -889,7 +944,13 @@ def main():
         fid = flare_id(flare)
         try:
             output = render_card(flare, xray_times, xray_fluxes)
+            # Persist BEFORE sending. The pipeline runs under a hard systemd
+            # timeout; if we're SIGTERM'd mid-run, a kill AFTER this point just
+            # means we miss a post (acceptable). A kill BEFORE persisting used
+            # to re-send the same card every run = user-facing spam. Mark
+            # processed, save, *then* send → at-most-once delivery.
             processed_ids.add(fid)
+            save_processed_ids(processed_ids)
             generated.append(output)
             print(f"  [done] Card: {output}")
 
