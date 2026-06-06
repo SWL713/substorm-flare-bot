@@ -39,10 +39,13 @@ XRAY_URLS = [
 ]
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-TEMPLATE_PATH      = "template.png"
+# Per-bot config via env so ONE codebase runs as both the Substorm Society bot
+# (defaults) and the Aurora Outpost bot (FLARE_* overrides) — each posts to its
+# OWN destination with its OWN state dir; no cross-posting, no shared dedup.
+TEMPLATE_PATH      = os.environ.get("FLARE_TEMPLATE_PATH", "template.png")
 CARDS_DIR          = "cards"
 CHARTS_DIR         = "charts"
-DATA_DIR           = "data"
+DATA_DIR           = os.environ.get("FLARE_DATA_DIR", "data")
 STATE_FILE         = os.path.join(DATA_DIR, "processed_flares.json")
 LEGACY_STATE_FILE  = os.path.join(DATA_DIR, "last_flare_id.txt")
 ACTIVE_EVENTS_FILE = os.path.join(DATA_DIR, "active_events.json")
@@ -647,6 +650,11 @@ def _build_chart(peak_time, flare_class, chart_path, xray_times, xray_fluxes,
         spine.set_color("#c9b27a")
         spine.set_alpha(0.22)
 
+    # Time-only x-axis with a handful of ticks (was rendering the repeated date).
+    import matplotlib.dates as mdates
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=6))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=timezone.utc))
+
     plt.tight_layout()
     plt.savefig(chart_path, dpi=200, bbox_inches="tight", transparent=True, pad_inches=0.02)
     plt.close(fig)
@@ -692,7 +700,7 @@ def _composite_chart(template, chart_path, sdo_img=None):
     chart_img = Image.open(chart_path).convert("RGBA")
 
     x_base, y_base = 105, 865
-    panel_w, panel_h = 870, 395
+    panel_w, panel_h = 870, 360
 
     if sdo_img:
         # SDO is square, sized to panel height, with gap
@@ -700,7 +708,7 @@ def _composite_chart(template, chart_path, sdo_img=None):
         sdo_size = panel_h
         chart_w = panel_w - sdo_size - gap
         chart_shift_left = 35
-        chart_extra_h = 55  # extend chart taller
+        chart_extra_h = 20  # extend chart taller (trimmed to leave room for the in-panel data caption)
 
         # Chart: scale to fit left portion, taller than panel
         chart_img.thumbnail((chart_w, panel_h + chart_extra_h))
@@ -836,27 +844,31 @@ def render_card(flare, xray_times, xray_fluxes):
 
     bbox    = draw.textbbox((0, 0), flare_class, font=font_class)
     x_class = (template.width - (bbox[2] - bbox[0])) // 2
-    draw_glow_text(template, (x_class, 520), flare_class, font_class, fill_color)
+    draw_glow_text(template, (x_class, 498), flare_class, font_class, fill_color)
 
-    line1 = f"Start : {start_str}      Peak : {peak_str}"
-    line2 = f"End : {end_str}      Duration : {duration_str}"
-    x1 = (template.width - draw.textbbox((0, 0), line1, font=font_info)[2]) // 2
-    x2 = (template.width - draw.textbbox((0, 0), line2, font=font_info)[2]) // 2
-    draw.text((x1, 690), line1, font=font_info, fill=(230, 230, 230, 255))
-    draw.text((x2, 735), line2, font=font_info, fill=(230, 230, 230, 255))
-
-    # Source line (active region + heliographic location) — only drawn when
-    # DONKI gave us at least one. Limb flares often have neither, in which
-    # case we skip the line entirely rather than print an empty placeholder.
+    # Data as a 3-column x 2-row grid (Start/Peak/End on top, Duration/Region/
+    # Location below) — shorter than the old 2-col x 3-row stack so it clears
+    # the chart panel. Label over value per cell.
     ar_num   = flare.get("active_region")
     loc_text = flare.get("location") or flare.get("source_location")
-    src_bits = []
-    if ar_num:   src_bits.append(f"Region : AR {ar_num}")
-    if loc_text: src_bits.append(f"Location : {loc_text}")
-    if src_bits:
-        line3 = "      ".join(src_bits)
-        x3 = (template.width - draw.textbbox((0, 0), line3, font=font_info)[2]) // 2
-        draw.text((x3, 775), line3, font=font_info, fill=(200, 220, 240, 255))
+    font_lbl = load_font(20)
+    font_val = load_font(28, True)
+    cells = [
+        ("START",    start_str),
+        ("PEAK",     peak_str),
+        ("END",      end_str),
+        ("DURATION", duration_str),
+        ("REGION",   f"AR {ar_num}" if ar_num else "—"),
+        ("LOCATION", loc_text or "—"),
+    ]
+    col_cx  = [int(template.width * 0.24), template.width // 2, int(template.width * 0.76)]
+    row_top = [640, 702]
+    for i, (lbl, val) in enumerate(cells):
+        cx = col_cx[i % 3]; ry = row_top[i // 3]
+        lb = draw.textbbox((0, 0), lbl, font=font_lbl)
+        draw.text((cx - (lb[2] - lb[0]) // 2, ry), lbl, font=font_lbl, fill=(110, 165, 180, 255))
+        vb = draw.textbbox((0, 0), val, font=font_val)
+        draw.text((cx - (vb[2] - vb[0]) // 2, ry + 25), val, font=font_val, fill=(236, 236, 236, 255))
 
     chart_title = f"{satellite} X-Ray Flux"
     x_chart = (template.width - draw.textbbox((0, 0), chart_title, font=font_chart)[2]) // 2
@@ -870,10 +882,11 @@ def render_card(flare, xray_times, xray_fluxes):
                   inprogress=False, event_start=start_dt, sdo_mode=bool(sdo_img))
     _composite_chart(template, chart_path, sdo_img)
 
-    footer = f"Data: NOAA SWPC  -  Satellite: {satellite}"
+    # Data-source caption INSIDE the chart/SDO panel (near its bottom) so it no
+    # longer collides with the baked-in auroraoutpost.com footer.
+    footer = f"Data: NOAA SWPC  ·  Satellite: {satellite}"
     x_footer = (template.width - draw.textbbox((0, 0), footer, font=font_footer)[2]) // 2
-    draw.text((x_footer, template.height - 36), footer,
-               font=font_footer, fill=(220, 220, 220, 255))
+    draw.text((x_footer, 1238), footer, font=font_footer, fill=(150, 162, 178, 255))
 
     filename    = f"flare_{peak_dt.strftime('%Y%m%d_%H%M')}_{flare_class.replace('.', 'p')}.png"
     output_path = os.path.join(CARDS_DIR, filename)
@@ -942,34 +955,35 @@ def main():
 
     for flare in new_flares:
         fid = flare_id(flare)
+        fc  = flare.get("max_class", "?")
+        loc = flare.get("location") or flare.get("source_location")
+
+        # CARD only once the SDO source region is characterized (location known,
+        # so the sun image gets its outlined red box). No location yet → hold the
+        # card and retry next cycle; the live rising-alert text (STEP 2) is the
+        # first heads-up, so we NEVER post a region-less "preliminary" card.
+        if not loc:
+            print(f"  [hold] {fid}: {fc} — awaiting SDO source region")
+            continue
+
         try:
             output = render_card(flare, xray_times, xray_fluxes)
-            # Persist BEFORE sending. The pipeline runs under a hard systemd
-            # timeout; if we're SIGTERM'd mid-run, a kill AFTER this point just
-            # means we miss a post (acceptable). A kill BEFORE persisting used
-            # to re-send the same card every run = user-facing spam. Mark
-            # processed, save, *then* send → at-most-once delivery.
+            # Persist BEFORE sending so a mid-run SIGTERM can't re-post the card.
             processed_ids.add(fid)
             save_processed_ids(processed_ids)
             generated.append(output)
-            print(f"  [done] Card: {output}")
-
-            fc = flare.get("max_class", "?")
             peak_t = flare.get("max_time", "")[:16].replace("T", " ")
             ar  = flare.get("active_region")
-            loc = flare.get("location") or flare.get("source_location")
-            # Append source line only when DONKI gave us at least one of AR / loc.
-            # Limb flares often have neither — keep the caption clean in that case.
-            source_bits = []
-            if ar:  source_bits.append(f"AR {ar}")
-            if loc: source_bits.append(loc)
-            source_line = (" · ".join(source_bits))
+            src_bits = []
+            if ar:  src_bits.append(f"AR {ar}")
+            if loc: src_bits.append(loc)
             caption = f"<b>Solar Flare — {fc}</b>\nPeak: {peak_t} UTC"
-            if source_line:
-                caption += f"\nSource: {source_line}"
+            if src_bits:
+                caption += f"\nSource: {' · '.join(src_bits)}"
             send_telegram_photo(output, caption)
+            print(f"  [card] {fid}: {output}")
         except Exception as exc:
-            print(f"  [fail] {fid}: {exc}")
+            print(f"  [fail] card {fid}: {exc}")
 
     save_processed_ids(processed_ids)
 
@@ -1036,45 +1050,44 @@ def main():
     print(f"\nDone. {len(generated)} card(s) generated.")
 
 
+def _bot_token():
+    # FLARE_BOT_TOKEN (this bot's own token) wins; fall back to the legacy var.
+    return os.environ.get("FLARE_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+
+
+def _bot_chat_ids():
+    # FLARE_CHAT_IDS (comma-separated) overrides; else legacy group + channel.
+    raw = os.environ.get("FLARE_CHAT_IDS")
+    if raw:
+        return [c.strip() for c in raw.split(",") if c.strip()]
+    return [c for c in (os.environ.get("TELEGRAM_CHAT_ID"),
+                        os.environ.get("TELEGRAM_CHANNEL_ID")) if c]
+
+
 def send_telegram_message(text):
-    """Send a plain text message to the Telegram group + channel."""
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_ids = [
-        os.environ.get("TELEGRAM_CHAT_ID"),
-        os.environ.get("TELEGRAM_CHANNEL_ID"),
-    ]
+    """Send a plain text message to this bot's configured chat(s)."""
+    bot_token = _bot_token()
     if not bot_token:
         return
-    for chat_id in chat_ids:
-        if not chat_id:
-            continue
+    for chat_id in _bot_chat_ids():
         try:
             resp = requests.post(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
                 data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
                 timeout=15,
             )
-            result = resp.json()
-            if result.get("ok"):
-                print(f"  [telegram] Text sent to {chat_id}")
-            else:
-                print(f"  [telegram] Text send failed to {chat_id}: {result}")
+            ok = resp.json().get("ok")
+            print(f"  [telegram] Text -> {chat_id}: {'ok' if ok else resp.text[:120]}")
         except Exception as e:
             print(f"  [telegram] Text error to {chat_id}: {e}")
 
 
 def send_telegram_photo(image_path, caption):
-    """Send a flare card image to the Telegram group + channel."""
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_ids = [
-        os.environ.get("TELEGRAM_CHAT_ID"),
-        os.environ.get("TELEGRAM_CHANNEL_ID"),
-    ]
+    """Send a flare card image to this bot's configured chat(s)."""
+    bot_token = _bot_token()
     if not bot_token:
         return
-    for chat_id in chat_ids:
-        if not chat_id:
-            continue
+    for chat_id in _bot_chat_ids():
         try:
             with open(image_path, "rb") as photo:
                 resp = requests.post(
@@ -1083,11 +1096,8 @@ def send_telegram_photo(image_path, caption):
                     files={"photo": photo},
                     timeout=30,
                 )
-            result = resp.json()
-            if result.get("ok"):
-                print(f"  [telegram] Alert sent to {chat_id}: {os.path.basename(image_path)}")
-            else:
-                print(f"  [telegram] Send failed to {chat_id}: {result}")
+            ok = resp.json().get("ok")
+            print(f"  [telegram] Card -> {chat_id}: {'ok' if ok else resp.text[:120]}")
         except Exception as e:
             print(f"  [telegram] Error sending to {chat_id}: {e}")
 

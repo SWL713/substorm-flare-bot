@@ -6,6 +6,9 @@ data/active_events.json
 data/rising_alert_state.json
 data/last_flare_id.txt
 
+# Aurora Outpost flare-bot run (FLARE_DATA_DIR=data_ao) — its own runtime state
+data_ao/
+
 # Generated cards + charts — regenerated every run, not source of truth
 cards/*.png
 charts/*.png
