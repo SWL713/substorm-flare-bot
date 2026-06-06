@@ -981,6 +981,7 @@ def main():
             if src_bits:
                 caption += f"\nSource: {' · '.join(src_bits)}"
             send_telegram_photo(output, caption)
+            post_to_social(output, caption)  # AO run only (env-gated); no-op otherwise
             print(f"  [card] {fid}: {output}")
         except Exception as exc:
             print(f"  [fail] card {fid}: {exc}")
@@ -1100,6 +1101,73 @@ def send_telegram_photo(image_path, caption):
             print(f"  [telegram] Card -> {chat_id}: {'ok' if ok else resp.text[:120]}")
         except Exception as e:
             print(f"  [telegram] Error sending to {chat_id}: {e}")
+
+
+# ─── Social cross-post (X + Facebook) ────────────────────────────────────────
+# AO run only: each platform no-ops unless ITS tokens are in the environment.
+# pipeline_runner exports X_*/FB_* only inside the Aurora Outpost flare-bot
+# subshell, so the Substorm run never cross-posts. Every failure is swallowed —
+# a social hiccup must never break the Telegram card flow.
+
+def _social_text(caption):
+    """Telegram HTML caption -> plain text + site/handles, capped for X's 280."""
+    import re
+    text = re.sub(r"<[^>]+>", "", caption or "").replace("&amp;", "&").strip()
+    footer = "\n\nauroraoutpost.com  #aurora #solarflare #spaceweather"
+    if len(text) + len(footer) > 280:
+        text = text[:280 - len(footer) - 1].rstrip()
+    return text + footer
+
+
+def _post_x(image_path, text):
+    keys = [os.environ.get(k) for k in
+            ("X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_SECRET")]
+    if not all(keys):
+        return
+    try:
+        from requests_oauthlib import OAuth1
+    except ImportError:
+        print("  [x] requests_oauthlib not installed — skipping X")
+        return
+    auth = OAuth1(*keys)
+    try:
+        with open(image_path, "rb") as f:
+            up = requests.post("https://upload.twitter.com/1.1/media/upload.json",
+                               files={"media": f}, auth=auth, timeout=60)
+        if up.status_code >= 300:
+            print(f"  [x] media upload failed: {up.status_code} {up.text[:140]}")
+            return
+        media_id = up.json().get("media_id_string")
+        tw = requests.post("https://api.twitter.com/2/tweets",
+                           json={"text": text, "media": {"media_ids": [media_id]}},
+                           auth=auth, timeout=30)
+        ok = tw.status_code < 300
+        print(f"  [x] {'posted' if ok else 'FAILED'} {tw.status_code} {'' if ok else tw.text[:160]}")
+    except Exception as e:
+        print(f"  [x] error: {e}")
+
+
+def _post_facebook(image_path, text):
+    page_id = os.environ.get("FB_PAGE_ID")
+    token   = os.environ.get("FB_PAGE_TOKEN")
+    if not (page_id and token):
+        return
+    try:
+        with open(image_path, "rb") as f:
+            r = requests.post(f"https://graph.facebook.com/v21.0/{page_id}/photos",
+                              data={"message": text, "access_token": token},
+                              files={"source": f}, timeout=60)
+        ok = r.status_code < 300
+        print(f"  [fb] {'posted' if ok else 'FAILED'} {r.status_code} {'' if ok else r.text[:160]}")
+    except Exception as e:
+        print(f"  [fb] error: {e}")
+
+
+def post_to_social(image_path, caption):
+    """Cross-post a finalized flare card to X + Facebook (no-op without tokens)."""
+    text = _social_text(caption)
+    _post_x(image_path, text)
+    _post_facebook(image_path, text)
 
 
 if __name__ == "__main__":
